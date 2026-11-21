@@ -1,0 +1,21 @@
+# rust
+/target
+/.cargo
+
+# 本地打包产物（用 GitHub Releases 分发，不进仓库）
+/StudyDeck.app
+/*.dmg
+/apps/desktop/build
+
+# 依赖
+node_modules/
+apps/web/.npmcache
+
+# 运行时数据：配置、密钥、数据库都不进仓库
+/data
+.env
+
+.DS_Store
+
+# tauri 生成的 schema（构建时重建）
+/apps/desktop/src-tauri/gen

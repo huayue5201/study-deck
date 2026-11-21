@@ -1,0 +1,15 @@
+[package]
+name = "studydeck-core"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "studydeck_core"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
