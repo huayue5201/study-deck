@@ -1,6 +1,7 @@
 //! agent 运行时：唯一允许碰网络与子进程的领域 crate。
 
 pub mod assemble;
+pub mod context;
 pub mod engine;
 pub mod provider;
 pub mod tool;

@@ -47,6 +47,7 @@ import {
   type MessageHit,
   type ProviderPreset,
   type SessionSummary,
+  type SessionUsage,
   type SessionView,
   type SessionOrigin,
   type Topic,
@@ -92,6 +93,12 @@ function toolLabel(
   }
 }
 
+function formatTokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`
+  return String(value)
+}
+
 function sameMessages(a: Message[], b: Message[]): boolean {
   if (a.length !== b.length) return false
   return a.every(
@@ -113,6 +120,7 @@ export default function App() {
   const { t } = useI18n()
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
+  const [usage, setUsage] = useState<SessionUsage | null>(null)
   const [origin, setOrigin] = useState<SessionOrigin | null>(null)
   const [topic, setTopic] = useState<Topic | null>(null)
   const [promote, setPromote] = useState<OpenCardState | null>(null)
@@ -336,6 +344,7 @@ export default function App() {
         const view = await fetchSession(sid)
         if (cancelled) return
         setMessages((current) => (sameMessages(current, view.messages) ? current : view.messages))
+        setUsage(view.usage ?? null)
         setOrigin((current) =>
           JSON.stringify(current) === JSON.stringify(view.origin) ? current : view.origin,
         )
@@ -589,6 +598,11 @@ export default function App() {
       setStreamingId(null)
       clearTool()
       void refreshSessions()
+      if (sessionRef.current) {
+        void fetchSession(sessionRef.current)
+          .then((view) => setUsage(view.usage ?? null))
+          .catch(() => undefined)
+      }
     }
   }, [refreshSessions, refreshTopics, topic, beginTool, finishTool, clearTool])
 
@@ -901,6 +915,14 @@ export default function App() {
             {!topicPageId && topic && <span className="topic-chip">{t('专题')}</span>}
           </div>
           <span className="spacer" />
+          {usage && usage.total_tokens > 0 && (
+            <span
+              className="topbar-usage"
+              title={t('本会话累计 token')}
+            >
+              {formatTokens(usage.total_tokens)} tok
+            </span>
+          )}
           <span className="topbar-model" title={t('当前对话模型')}>
             <span className="status-dot" />
             {settings?.model || t('未配置模型')}

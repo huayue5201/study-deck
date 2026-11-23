@@ -31,6 +31,7 @@ const EN: Record<string, string> = {
   '本地工作区 · 自动保存': 'Local workspace · Autosaved',
   '设置': 'Settings',
   '账本': 'Ledger',
+  '本会话累计 token': 'Tokens used in this chat',
   '收起账本': 'Close ledger',
   '会话': 'Chat',
   '当前对话模型': 'Current model',

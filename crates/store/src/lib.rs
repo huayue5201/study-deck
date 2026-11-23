@@ -89,6 +89,14 @@ pub struct CourseSummary {
     pub next_date: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SessionUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub turns: u64,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionOriginSummary {
     pub parent_session_id: String,
@@ -266,6 +274,21 @@ fn migrate(conn: &Connection) -> Result<()> {
                 );
                 CREATE INDEX IF NOT EXISTS idx_course_items_course ON course_items(course_id, position);
                 CREATE INDEX IF NOT EXISTS idx_course_items_topic ON course_items(topic_id);",
+            )?;
+            Ok(())
+        }),
+        (9, |c| {
+            c.execute_batch(
+                "CREATE TABLE IF NOT EXISTS turn_usage (
+                    turn_id           TEXT PRIMARY KEY,
+                    session_id        TEXT NOT NULL,
+                    prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+                    completion_tokens INTEGER NOT NULL DEFAULT 0,
+                    rounds            INTEGER NOT NULL DEFAULT 0,
+                    created_at        TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_turn_usage_session
+                    ON turn_usage(session_id);",
             )?;
             Ok(())
         }),
@@ -493,6 +516,47 @@ impl Store {
             params![cwd, titled.id.as_str(), titled.created_at.to_rfc3339()],
         )?;
         Ok(titled)
+    }
+
+    pub fn add_turn_usage(
+        &self,
+        turn_id: &str,
+        session_id: &str,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        rounds: u32,
+    ) -> Result<()> {
+        self.conn().execute(
+            "INSERT OR REPLACE INTO turn_usage
+             (turn_id, session_id, prompt_tokens, completion_tokens, rounds, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                turn_id,
+                session_id,
+                prompt_tokens as i64,
+                completion_tokens as i64,
+                rounds as i64,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn session_usage(&self, session_id: &str) -> Result<SessionUsage> {
+        let (prompt, completion, turns): (i64, i64, i64) = self.conn().query_row(
+            "SELECT COALESCE(SUM(prompt_tokens), 0),
+                    COALESCE(SUM(completion_tokens), 0),
+                    COUNT(*)
+             FROM turn_usage WHERE session_id = ?1",
+            params![session_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        Ok(SessionUsage {
+            prompt_tokens: prompt as u64,
+            completion_tokens: completion as u64,
+            total_tokens: (prompt + completion) as u64,
+            turns: turns as u64,
+        })
     }
 
     /// 会话绑定的项目根目录（来自 /api/ask 的 cwd），没有则 None。
@@ -2394,6 +2458,30 @@ mod tests {
         store.delete_course(course.id.as_str()).expect("delete");
         assert!(store.course(course.id.as_str()).unwrap().is_none());
 
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn usage_totals_are_aggregated_per_session() {
+        let path = std::env::temp_dir().join(format!(
+            "studydeck-usage-{}-{}.db",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let store = Store::open(&path).expect("open store");
+        let session = store.create_session().expect("session");
+        store
+            .add_turn_usage("t1", session.id.as_str(), 120, 30, 1)
+            .expect("usage");
+        store
+            .add_turn_usage("t2", session.id.as_str(), 80, 20, 2)
+            .expect("usage");
+        let usage = store.session_usage(session.id.as_str()).expect("totals");
+        assert_eq!(usage.prompt_tokens, 200);
+        assert_eq!(usage.completion_tokens, 50);
+        assert_eq!(usage.total_tokens, 250);
+        assert_eq!(usage.turns, 2);
         drop(store);
         let _ = std::fs::remove_file(path);
     }

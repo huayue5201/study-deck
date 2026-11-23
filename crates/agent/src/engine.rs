@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     assemble::{CardAssembler, MainAssembler},
+    context,
     provider::{ChatMessage, ChatRequest, FunctionCall, Provider, ToolCallPayload},
     tool,
 };
@@ -51,6 +52,7 @@ pub async fn run_turn(
         }
         outcome.rounds = round + 1;
 
+        context::fit_messages(&mut messages, context::INPUT_TOKEN_BUDGET);
         let streamed = tokio::select! {
             _ = cancel.cancelled() => {
                 outcome.cancelled = true;
@@ -107,6 +109,7 @@ pub async fn run_turn(
                 Ok(value) => (true, value),
                 Err(err) => (false, format!("工具执行失败：{err}")),
             };
+            let result = context::cap_tool_output(&result, context::TOOL_RESULT_CHARS);
 
             let _ = tx.send(AgentEvent::ToolDone {
                 name: call.name.clone(),

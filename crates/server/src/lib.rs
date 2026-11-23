@@ -30,6 +30,7 @@ use store::Store;
 use studydeck_core::{
     AgentEvent, Anchor, Card, CardId, Course, CourseItemStatus, Depth, GlossaryEntry, Mastery,
     Message, MessageStatus, Mode, SessionId, Topic, TopicEdgeKind, TopicNodeStatus, TurnRequest,
+    Usage,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::BroadcastStream;
@@ -519,12 +520,14 @@ async fn get_session(
     };
     let topic = state.store.topic_for_session(&id).ok().flatten();
     let origin = state.store.session_seed(&id).ok().flatten();
+    let usage = state.store.session_usage(&id).unwrap_or_default();
     Json(json!({
         "id": session.id,
         "messages": messages,
         "cards": cards,
         "topic": topic,
         "origin": origin,
+        "usage": usage,
         "active_turn": state.registry.list(true).into_iter()
             .find(|turn| turn.session_id == id)
             .map(|turn| turn.id),
@@ -1816,10 +1819,28 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
         tokio::spawn(async move {
             let outcome =
                 agent::run_turn(provider.as_ref(), &request, &sender, cancel.clone()).await;
-            let (final_state, mut text, error) = match outcome {
-                Ok(result) if result.cancelled => (TurnState::Cancelled, result.text, None),
-                Ok(result) => (TurnState::Ok, result.text, None),
-                Err(err) => (TurnState::Error, String::new(), Some(err.to_string())),
+            let (final_state, mut text, error, usage, rounds) = match outcome {
+                Ok(result) if result.cancelled => (
+                    TurnState::Cancelled,
+                    result.text,
+                    None,
+                    result.usage,
+                    result.rounds,
+                ),
+                Ok(result) => (
+                    TurnState::Ok,
+                    result.text,
+                    None,
+                    result.usage,
+                    result.rounds,
+                ),
+                Err(err) => (
+                    TurnState::Error,
+                    String::new(),
+                    Some(err.to_string()),
+                    Usage::default(),
+                    0,
+                ),
             };
             if text.is_empty() {
                 if let Ok(partial) = progress.lock() {
@@ -1852,6 +1873,17 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
             if let Some(id) = card.as_ref() {
                 let _ = state.store.update_card(id.as_str(), &text, &question);
             }
+            let (turn_id, session_id) = {
+                let guard = turn.lock().expect("turn poisoned");
+                (guard.id.clone(), guard.session_id.clone())
+            };
+            let _ = state.store.add_turn_usage(
+                &turn_id,
+                &session_id,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                rounds as u32,
+            );
             state.registry.finish(&turn, final_state, error);
         });
     }

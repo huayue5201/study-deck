@@ -54,6 +54,7 @@ impl Provider for OpenAiCompat {
             "model": self.model,
             "stream": true,
             "temperature": self.temperature,
+            "max_tokens": 4096,
             "messages": request.messages,
         });
 

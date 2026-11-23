@@ -94,12 +94,20 @@ export interface SessionOrigin {
   metadata?: Record<string, unknown>
 }
 
+export interface SessionUsage {
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  turns: number
+}
+
 export interface SessionView {
   id: string
   messages: Message[]
   cards: CardRecord[]
   topic: Topic | null
   origin: SessionOrigin | null
+  usage?: SessionUsage
 }
 
 export type Mastery = 'unknown' | 'learning' | 'mastered'

@@ -2,8 +2,10 @@
 //! 这是整个项目里最值钱的 300 行。
 
 use studydeck_core::{
-    Anchor, Block, ContextAssembler, Depth, Mode, Role, SessionSeed, Topic, TurnRequest,
+    Anchor, Block, ContextAssembler, Depth, Message, Mode, Role, SessionSeed, Topic, TurnRequest,
 };
+
+use crate::context;
 
 const MAIN_SYSTEM: &str = r#"你是学习伙伴，用中文回答，面向正在自学的人。
 
@@ -41,6 +43,25 @@ const CARD_SYSTEM: &str = r#"你是「卡片」：用户在主线对话里选中
 - 全文控制在 260 字以内。
 "#;
 
+/// 老的完整历史不再整段发送：只保留关键线索，避免长会话每轮重复付费。
+fn compact_history(messages: &[Message], max_chars: usize) -> String {
+    let mut out = String::from("【较早对话已压缩，保留关键线索】\n");
+    for message in messages {
+        let role = match message.role {
+            Role::User => "用户",
+            Role::Assistant => "助教",
+            Role::System => continue,
+        };
+        let text: String = message.text.chars().take(160).collect();
+        let line = format!("{role}：{text}\n");
+        if out.chars().count() + line.chars().count() > max_chars {
+            break;
+        }
+        out.push_str(&line);
+    }
+    out
+}
+
 pub struct MainAssembler;
 pub struct CardAssembler;
 
@@ -51,7 +72,7 @@ fn topic_block(topic: &Topic) -> String {
     }
     out.push_str(&format!("目标深度：{}。\n", topic.depth_goal.label_cn()));
     if !topic.outline_md.trim().is_empty() {
-        let outline: String = topic.outline_md.chars().take(2000).collect();
+        let outline: String = topic.outline_md.chars().take(1200).collect();
         out.push_str(&format!("已保存的学习地图：\n{outline}\n"));
     }
     out.push_str("围绕这个专题的长期目标回答；不要重复已经有定论的内容。\n");
@@ -70,7 +91,7 @@ fn seed_block(seed: &SessionSeed, first_turn: bool, wants_map: bool) -> String {
         out.push_str(&format!("\n【起点上下文】\n{}\n", seed.context));
     }
     if !seed.answer.trim().is_empty() {
-        let answer: String = seed.answer.chars().take(1200).collect();
+        let answer: String = seed.answer.chars().take(800).collect();
         out.push_str(&format!("\n【卡片已有解释（不要重复）】\n{answer}\n"));
     }
     out.push_str(&format!("\n目标深度：{}。\n", seed.depth.label_cn()));
@@ -88,18 +109,54 @@ fn seed_block(seed: &SessionSeed, first_turn: bool, wants_map: bool) -> String {
 
 impl ContextAssembler for MainAssembler {
     fn assemble(&self, request: &TurnRequest) -> Vec<Block> {
-        let mut blocks = vec![Block::system(MAIN_SYSTEM)];
+        let mut system = vec![Block::system(MAIN_SYSTEM)];
         if let Some(topic) = &request.topic {
-            blocks.push(Block::system(topic_block(topic)));
+            system.push(Block::system(topic_block(topic)));
         }
         if let Some(seed) = &request.seed {
-            blocks.push(Block::system(seed_block(
+            system.push(Block::system(seed_block(
                 seed,
                 request.history.is_empty(),
                 request.text.contains("学习地图"),
             )));
         }
-        for message in &request.history {
+        if let Some(root) = &request.project_root {
+            system.push(Block::system(format!(
+                "你可以只读访问本次会话的项目根目录：\n{}\n需要看代码时用 read_file / list_dir / search_text；不要读取 .env、密钥等敏感文件，也不要尝试写文件。",
+                root.display()
+            )));
+        }
+
+        let fixed: usize = system
+            .iter()
+            .map(|block| context::estimate_tokens(&block.text) + 4)
+            .sum();
+        // 给工具 schema、当前问题和输出留余量；历史只在剩余空间里放。
+        let available = context::INPUT_TOKEN_BUDGET
+            .saturating_sub(fixed)
+            .saturating_sub(context::estimate_tokens(&request.text) + 4)
+            .saturating_sub(1_200);
+        let history = &request.history;
+        let mut keep_start = history.len();
+        let mut used = 0usize;
+        for index in (0..history.len()).rev() {
+            let message = &history[index];
+            let cost = context::estimate_tokens(&message.text) + 4;
+            if used + cost > available {
+                break;
+            }
+            used += cost;
+            keep_start = index;
+        }
+
+        let mut blocks = system;
+        if keep_start > 0 {
+            blocks.push(Block::system(compact_history(
+                &history[..keep_start],
+                context::HISTORY_DIGEST_CHARS,
+            )));
+        }
+        for message in &history[keep_start..] {
             match message.role {
                 Role::User => blocks.push(Block::user(message.text.clone())),
                 Role::Assistant => blocks.push(Block::assistant(message.text.clone())),
@@ -156,13 +213,13 @@ impl ContextAssembler for CardAssembler {
         user.push('\n');
 
         if let Some(history) = &request.card_history {
-            let trimmed: String = history.chars().take(6000).collect();
+            let trimmed: String = history.chars().take(3_000).collect();
             user.push_str("\n【这张卡片此前的追问与回答（继续对话，不要重复）】\n");
             user.push_str(&trimmed);
             user.push('\n');
         } else if let Some(parent) = &request.parent_card {
             user.push_str("\n【本卡片已有的解释（追问请在此基础上补充，不要重复）】\n");
-            let trimmed: String = parent.answer.chars().take(600).collect();
+            let trimmed: String = parent.answer.chars().take(500).collect();
             user.push_str(&trimmed);
             user.push('\n');
         }
@@ -290,6 +347,38 @@ mod tests {
             .join("\n");
         assert!(text.contains("这张卡片此前的追问与回答"));
         assert!(text.contains("因为边界条件"));
+    }
+
+    #[test]
+    fn long_history_is_compacted_into_a_digest() {
+        let mut request = request("现在继续");
+        request.seed = None;
+        request.history = (0..80)
+            .map(|index| {
+                let text = format!("第 {index} 轮：") + &"这是一段很长的历史内容。".repeat(100);
+                if index % 2 == 0 {
+                    Message::user(&SessionId::from("s"), text)
+                } else {
+                    Message::assistant(&SessionId::from("s"), text)
+                }
+            })
+            .collect();
+        let blocks = MainAssembler.assemble(&request);
+        let system: String = blocks
+            .iter()
+            .filter(|block| block.role == BlockRole::System)
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(system.contains("较早对话已压缩"), "old turns are compacted");
+        let estimated: usize = blocks
+            .iter()
+            .map(|block| context::estimate_tokens(&block.text) + 4)
+            .sum();
+        assert!(
+            estimated < context::INPUT_TOKEN_BUDGET + 2_000,
+            "assembled prompt stays near budget, got {estimated}"
+        );
     }
 
     #[test]
