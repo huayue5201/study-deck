@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useI18n } from '../lib/i18n'
 import { testConnection, updateSettings } from '../lib/api'
 import type { ProviderPreset, SettingsView } from '../lib/types'
 
@@ -10,6 +11,7 @@ interface Props {
 }
 
 export function SettingsForm({ presets, initial, submitLabel, onSaved }: Props) {
+  const { t } = useI18n()
   const matched = presets.find((preset) => preset.id === initial.provider)
   const [provider, setProvider] = useState(initial.provider || 'deepseek')
   const [baseUrl, setBaseUrl] = useState(initial.base_url || matched?.base_url || '')
@@ -31,7 +33,7 @@ export function SettingsForm({ presets, initial, submitLabel, onSaved }: Props) 
 
   const runTest = async () => {
     setBusy(true)
-    setMessage('测试中…')
+    setMessage(t('测试中…'))
     try {
       const result = await testConnection({ base_url: baseUrl, model, api_key: apiKey })
       setOk(result.ok)
@@ -67,19 +69,19 @@ export function SettingsForm({ presets, initial, submitLabel, onSaved }: Props) 
   return (
     <div className="settings-form">
       <label>
-        <span>服务商</span>
+        <span>{t('服务商')}</span>
         <select value={provider} onChange={(event) => applyPreset(event.target.value)}>
           {presets.map((item) => (
             <option key={item.id} value={item.id}>
-              {item.label}
+              {t(item.label)}
             </option>
           ))}
         </select>
       </label>
-      {preset?.note && <p className="muted small">{preset.note}</p>}
+      {preset?.note && <p className="muted small">{t(preset.note)}</p>}
 
       <label>
-        <span>接口地址</span>
+        <span>{t('接口地址')}</span>
         <input
           value={baseUrl}
           placeholder="https://api.deepseek.com"
@@ -88,7 +90,7 @@ export function SettingsForm({ presets, initial, submitLabel, onSaved }: Props) 
       </label>
 
       <label>
-        <span>模型</span>
+        <span>{t('模型')}</span>
         <input
           value={model}
           list="model-options"
@@ -107,22 +109,22 @@ export function SettingsForm({ presets, initial, submitLabel, onSaved }: Props) 
         <input
           type="password"
           value={apiKey}
-          placeholder={initial.has_key ? '已保存，留空表示不修改' : 'sk-…'}
+          placeholder={initial.has_key ? t('已保存，留空表示不修改') : 'sk-…'}
           onChange={(event) => setApiKey(event.target.value)}
         />
       </label>
 
       <p className="muted small">
-        Key 只存在这台机器：优先写入系统钥匙串
-        {initial.has_key && !initial.key_in_keychain ? '（当前为本地文件，权限 600）' : ''}
-        。
+        {t('Key 只存在这台机器：优先写入系统钥匙串')}
+        {initial.has_key && !initial.key_in_keychain ? t('（当前为本地文件，权限 600）') : ''}
+        {t('。')}
       </p>
 
       {message && <p className={ok ? 'ok-msg' : 'err-msg'}>{message}</p>}
 
       <div className="form-actions">
         <button onClick={() => void runTest()} disabled={busy || !baseUrl || !model}>
-          测试连接
+          {t('测试连接')}
         </button>
         <button className="primary" onClick={() => void save()} disabled={busy || !baseUrl || !model}>
           {submitLabel}

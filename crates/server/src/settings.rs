@@ -45,7 +45,9 @@ pub struct SettingsStore {
 
 impl SettingsStore {
     pub fn new(dir: &Path) -> Self {
-        Self { path: dir.join("settings.json") }
+        Self {
+            path: dir.join("settings.json"),
+        }
     }
 
     pub fn load(&self) -> Settings {

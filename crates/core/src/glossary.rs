@@ -1,7 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{anchor::Anchor, card::Depth, ids::{EntryId, SessionId}};
+use crate::{
+    anchor::Anchor,
+    card::Depth,
+    ids::{EntryId, SessionId},
+};
 
 /// 掌握程度：账本不只要记"是什么"，还要记"我懂了没有"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,7 +68,12 @@ pub struct GlossaryEntry {
 }
 
 impl GlossaryEntry {
-    pub fn new(term: impl Into<String>, gist: impl Into<String>, depth: Depth, anchor: Option<Anchor>) -> Self {
+    pub fn new(
+        term: impl Into<String>,
+        gist: impl Into<String>,
+        depth: Depth,
+        anchor: Option<Anchor>,
+    ) -> Self {
         Self {
             id: EntryId::new(),
             term: term.into(),

@@ -1,7 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{anchor::Anchor, ids::{CardId, SessionId}};
+use crate::{
+    anchor::Anchor,
+    ids::{CardId, SessionId},
+};
 
 /// 理解深度契约：不是所有术语都要懂到一样深。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,5 +73,8 @@ pub struct Card {
     pub depth: Depth,
     pub question: String,
     pub answer: String,
+    /// 这张卡片升级成的专题会话；None 表示还没升级。
+    #[serde(default)]
+    pub promoted_session_id: Option<SessionId>,
     pub created_at: DateTime<Utc>,
 }

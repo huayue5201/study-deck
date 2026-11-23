@@ -46,3 +46,8 @@ id_type!(SessionId);
 id_type!(MessageId);
 id_type!(CardId);
 id_type!(EntryId);
+id_type!(TopicId);
+id_type!(TopicEdgeId);
+id_type!(CourseId);
+id_type!(CourseItemId);
+id_type!(TopicNodeId);

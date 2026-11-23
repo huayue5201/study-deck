@@ -75,9 +75,10 @@ impl Anchor {
     /// 锚点前后各取 `radius` 个字符，供卡片装配上下文用。
     pub fn context_window(&self, source: &str, radius: usize) -> String {
         let chars: Vec<char> = source.chars().collect();
-        let (start, end) = self
-            .locate(source)
-            .unwrap_or((self.char_start.min(chars.len()), self.char_end.min(chars.len())));
+        let (start, end) = self.locate(source).unwrap_or((
+            self.char_start.min(chars.len()),
+            self.char_end.min(chars.len()),
+        ));
         let from = start.saturating_sub(radius);
         let to = (end + radius).min(chars.len());
         if from >= to {

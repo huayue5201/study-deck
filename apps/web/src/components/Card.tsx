@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { renderMarkdown } from '../lib/markdown'
+import { useI18n } from '../lib/i18n'
+import { isImeComposing } from '../lib/ime'
 import { DEPTH_HINT, DEPTH_LABEL, type Anchor, type Depth } from '../lib/types'
 
 export interface OpenCardState {
@@ -10,6 +12,7 @@ export interface OpenCardState {
   answer: string
   streaming: boolean
   saved: boolean
+  promotedSessionId: string | null
   rect: { left: number; top: number; width: number; height: number }
   sourceText: string
 }
@@ -21,13 +24,25 @@ interface Props {
   onFollowUp: (text: string) => void
   onSave: () => void
   onRegenerate: () => void
+  onPromote: () => void
+  onOpenPromoted: () => void
 }
 
 const DEPTHS: Depth[] = ['can_use', 'can_tune', 'can_derive']
 
 const MARGIN = 8
 
-export function Card({ card, onClose, onDepthChange, onFollowUp, onSave, onRegenerate }: Props) {
+export function Card({
+  card,
+  onClose,
+  onDepthChange,
+  onFollowUp,
+  onSave,
+  onRegenerate,
+  onPromote,
+  onOpenPromoted,
+}: Props) {
+  const { t } = useI18n()
   const [draft, setDraft] = useState('')
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
   const ref = useRef<HTMLDivElement | null>(null)
@@ -112,6 +127,7 @@ export function Card({ card, onClose, onDepthChange, onFollowUp, onSave, onRegen
       ref={ref}
       style={pos ? { left: pos.left, top: pos.top } : { visibility: 'hidden' }}
       onMouseUp={(event) => event.stopPropagation()}
+      onWheel={(event) => event.stopPropagation()}
     >
       <header
         className="card-head"
@@ -119,18 +135,18 @@ export function Card({ card, onClose, onDepthChange, onFollowUp, onSave, onRegen
         onPointerMove={onDrag}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
-        title="拖动卡片可移动"
+        title={t('拖动卡片可移动')}
       >
         <div className="card-term" title={card.anchor.quote}>
           {card.anchor.quote.slice(0, 60)}
         </div>
-        <button className="icon" onClick={onClose} title="关闭（Esc）">
+        <button className="icon" onClick={onClose} title={t('关闭（Esc）')}>
           ×
         </button>
       </header>
 
       <div className="card-breadcrumb" title={card.sourceText}>
-        来自：{card.sourceText.replace(/\s+/g, ' ').slice(0, 40) || '主线对话'}
+        {t('来自：{text}', { text: card.sourceText.replace(/\s+/g, ' ').slice(0, 40) || '主线对话' })}
       </div>
 
       <div className="card-depth">
@@ -138,14 +154,14 @@ export function Card({ card, onClose, onDepthChange, onFollowUp, onSave, onRegen
           <button
             key={depth}
             className={card.depth === depth ? 'active' : ''}
-            title={DEPTH_HINT[depth]}
+            title={t(DEPTH_HINT[depth])}
             onClick={() => onDepthChange(depth)}
             disabled={card.streaming}
           >
-            {DEPTH_LABEL[depth]}
+            {t(DEPTH_LABEL[depth])}
           </button>
         ))}
-        <span className="depth-hint">{DEPTH_HINT[card.depth]}</span>
+        <span className="depth-hint">{t(DEPTH_HINT[card.depth])}</span>
       </div>
 
       <div
@@ -156,28 +172,46 @@ export function Card({ card, onClose, onDepthChange, onFollowUp, onSave, onRegen
       <div className="card-followup">
         <input
           value={draft}
-          placeholder="继续追问（只在这张卡片里展开）"
+          placeholder={t('继续追问（仅限当前卡片上下文）')}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') submit()
+            if (event.key === 'Enter' && !isImeComposing(event)) {
+              event.preventDefault()
+              submit()
+            }
           }}
         />
         <button onClick={submit} disabled={card.streaming || !draft.trim()}>
-          追问
+          {t('发送')}
         </button>
       </div>
 
       <footer className="card-foot">
-        <span className="hint">支线只能展开一层，深挖请另开会话</span>
+        <span className="hint">
+          {card.id ? t('如需系统学习，可升级为专题') : t('生成完成后可升级为专题')}
+        </span>
         <div className="actions">
           {card.saved && (
             <button onClick={onRegenerate} disabled={card.streaming}>
-              重新生成
+              {t('重新生成')}
             </button>
           )}
           <button onClick={onSave} disabled={card.saved || !card.answer}>
-            {card.saved ? '已在账本' : '存进账本'}
+            {card.saved ? t('已保存') : t('保存到账本')}
           </button>
+          {card.promotedSessionId ? (
+            <button className="primary" onClick={onOpenPromoted}>
+              {t('打开专题')}
+            </button>
+          ) : (
+            <button
+              onClick={onPromote}
+              disabled={card.streaming || !card.id}
+              title={!card.id ? '等卡片生成完成后再升级' : '新建一个系统学习会话'}
+            >
+              {t('升级为专题')}
+            </button>
+          )}
         </div>
       </footer>
     </div>

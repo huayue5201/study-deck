@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use studydeck_core::{AgentEvent, Usage};
 use serde::{Deserialize, Serialize};
+use studydeck_core::{AgentEvent, Usage};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -19,13 +19,28 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn system(text: impl Into<String>) -> Self {
-        Self { role: "system".into(), content: text.into(), tool_call_id: None, tool_calls: None }
+        Self {
+            role: "system".into(),
+            content: text.into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }
     }
     pub fn user(text: impl Into<String>) -> Self {
-        Self { role: "user".into(), content: text.into(), tool_call_id: None, tool_calls: None }
+        Self {
+            role: "user".into(),
+            content: text.into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }
     }
     pub fn assistant(text: impl Into<String>) -> Self {
-        Self { role: "assistant".into(), content: text.into(), tool_call_id: None, tool_calls: None }
+        Self {
+            role: "assistant".into(),
+            content: text.into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }
     }
     pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {

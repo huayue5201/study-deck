@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Composer } from './components/Composer'
+import { Sidebar } from './components/Sidebar'
+import { OriginBanner } from './components/OriginBanner'
+import { PromoteDialog } from './components/PromoteDialog'
+import { TopicPage } from './components/TopicPage'
+import { CoursePage } from './components/CoursePage'
+import { CourseDialog } from './components/CourseDialog'
 import { MessageList } from './components/MessageList'
 import { CardLayer } from './components/CardLayer'
 import { GlossaryPanel } from './components/GlossaryPanel'
@@ -20,7 +26,16 @@ import {
   saveGlossary,
   searchMessages,
   streamChat,
+  promoteCard,
+  listTopics,
+  updateTopic,
+  listCourses,
+  createCourse,
+  listReminders,
+  parseTopicOutline,
 } from './lib/api'
+import { useI18n } from './lib/i18n'
+import { isImeComposing } from './lib/ime'
 import { readAnchor } from './lib/selection'
 import {
   DEPTH_LABEL,
@@ -33,6 +48,10 @@ import {
   type ProviderPreset,
   type SessionSummary,
   type SessionView,
+  type SessionOrigin,
+  type Topic,
+  type CourseSummary,
+  type Reminder,
   type SettingsView,
 } from './lib/types'
 
@@ -42,11 +61,46 @@ interface PendingSelection {
   sourceText: string
 }
 
+const OUTLINE_PROMPT =
+  '请基于这个专题起点，先给我一个 3–5 条的学习地图：每条只写主题、与其它条目的先修关系和目标深度；先不要展开正文，等我确认。'
+
 const EXAMPLES = [
   '讲讲采样定理，并指出哪些概念我现在可以不懂',
   '帮我理解 React 的 key 到底在解决什么问题',
   '我在学 Rust 所有权，给一个我能跑的小例子',
 ]
+
+function toolLabel(
+  name: string,
+  args: unknown,
+  t: (zh: string, vars?: Record<string, string | number>) => string,
+): string {
+  const value = (args && typeof args === 'object' ? args : {}) as Record<string, unknown>
+  const path = typeof value.path === 'string' ? value.path : ''
+  const query = typeof value.query === 'string' ? value.query : ''
+  switch (name) {
+    case 'read_file':
+      return t('正在读取 {path}…', { path: path || t('文件') })
+    case 'list_dir':
+      return t('正在查看目录 {path}…', { path: path || '.' })
+    case 'search_text':
+      return t('正在搜索「{query}」…', { query: query || t('项目') })
+    case 'clock':
+      return t('正在获取时间…')
+    default:
+      return t('正在使用 {name}…', { name })
+  }
+}
+
+function sameMessages(a: Message[], b: Message[]): boolean {
+  if (a.length !== b.length) return false
+  return a.every(
+    (message, index) =>
+      message.id === b[index].id &&
+      message.text === b[index].text &&
+      message.status === b[index].status,
+  )
+}
 
 function stripMarkdown(text: string): string {
   return text
@@ -56,8 +110,28 @@ function stripMarkdown(text: string): string {
 }
 
 export default function App() {
+  const { t } = useI18n()
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
+  const [origin, setOrigin] = useState<SessionOrigin | null>(null)
+  const [topic, setTopic] = useState<Topic | null>(null)
+  const [promote, setPromote] = useState<OpenCardState | null>(null)
+  const [promoting, setPromoting] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 900)
+  const [topics, setTopics] = useState<Topic[]>([])
+  const [courses, setCourses] = useState<CourseSummary[]>([])
+  const [topicPageId, setTopicPageId] = useState<string | null>(null)
+  const [coursePageId, setCoursePageId] = useState<string | null>(null)
+  const [showCourseDialog, setShowCourseDialog] = useState(false)
+  const [creatingCourse, setCreatingCourse] = useState(false)
+  const [dueReminders, setDueReminders] = useState<Reminder[]>([])
+  const [reminderDismissed, setReminderDismissed] = useState(false)
+  const [toolActivity, setToolActivity] = useState<{
+    name: string
+    args: unknown
+    state: 'running' | 'done'
+    ok?: boolean
+  } | null>(null)
   const [fake, setFake] = useState(false)
   const [card, setCard] = useState<OpenCardState | null>(null)
   const [pending, setPending] = useState<PendingSelection | null>(null)
@@ -76,13 +150,38 @@ export default function App() {
   const [hits, setHits] = useState<MessageHit[]>([])
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
-  const [confirmDelete, setConfirmDelete] = useState(false)
 
   const sessionRef = useRef<string | null>(null)
   const assistantIdRef = useRef<string | null>(null)
   const cardIdRef = useRef<string | null>(null)
+  const toolTimerRef = useRef<number | null>(null)
 
   sessionRef.current = sessionId
+
+  const beginTool = useCallback((name: string, args: unknown) => {
+    if (toolTimerRef.current !== null) {
+      window.clearTimeout(toolTimerRef.current)
+      toolTimerRef.current = null
+    }
+    setToolActivity({ name, args, state: 'running' })
+  }, [])
+
+  const finishTool = useCallback((name: string, ok: boolean) => {
+    setToolActivity((current) => (current ? { ...current, name, state: 'done', ok } : current))
+    if (toolTimerRef.current !== null) window.clearTimeout(toolTimerRef.current)
+    toolTimerRef.current = window.setTimeout(() => {
+      setToolActivity(null)
+      toolTimerRef.current = null
+    }, 1400)
+  }, [])
+
+  const clearTool = useCallback(() => {
+    if (toolTimerRef.current !== null) {
+      window.clearTimeout(toolTimerRef.current)
+      toolTimerRef.current = null
+    }
+    setToolActivity(null)
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -108,6 +207,8 @@ export default function App() {
             if (!cancelled) {
               setSessionId(view.id)
               setMessages(view.messages)
+              setOrigin(view.origin ?? null)
+              setTopic(view.topic ?? null)
               const list = await listSessions().catch(() => [])
               if (!cancelled) setSessions(list)
             }
@@ -145,6 +246,8 @@ export default function App() {
           if (!cancelled) {
             setSessionId(chosen.id)
             setMessages(chosen.messages)
+            setOrigin(chosen.origin ?? null)
+            setTopic(chosen.topic ?? null)
             setSessions(await listSessions().catch(() => []))
           }
           return
@@ -155,6 +258,8 @@ export default function App() {
         if (!cancelled) {
           setSessionId(id)
           setMessages([])
+          setOrigin(null)
+          setTopic(null)
         }
       } catch (err) {
         if (!cancelled) setError(String(err))
@@ -174,9 +279,89 @@ export default function App() {
     }
   }, [])
 
+  const refreshTopics = useCallback(async () => {
+    try {
+      setTopics(await listTopics())
+    } catch {
+      // 专题列表拿不到不影响主流程
+    }
+  }, [])
+
+  const refreshCourses = useCallback(async () => {
+    try {
+      setCourses(await listCourses())
+    } catch {
+      // 课程列表拿不到不影响主流程
+    }
+  }, [])
+
+  const refreshReminders = useCallback(async () => {
+    try {
+      setDueReminders(await listReminders())
+    } catch {
+      // 提醒拿不到不影响主流程
+    }
+  }, [])
+
   useEffect(() => {
     if (sessionId) void refreshSessions()
   }, [sessionId, refreshSessions])
+
+  // 外部投递（例如 nvim 的 /api/ask）会直接落库，不经过这个窗口。
+  // 定时 + 聚焦刷新，侧边栏才能在不重启的情况下看到新会话。
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void refreshSessions()
+    }
+    const timer = window.setInterval(refresh, 4000)
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refresh)
+      document.removeEventListener('visibilitychange', refresh)
+    }
+  }, [refreshSessions])
+
+  // 外部投递也可能写进当前正在看的会话（同一个 cwd）。本地没有流式回答时，
+  // 低频拉一次当前会话，让 nvim 的消息和状态落进正在打开的时间线。
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      if (document.visibilityState !== 'visible') return
+      if (topicPageId || coursePageId || streamingId) return
+      const sid = sessionRef.current
+      if (!sid) return
+      try {
+        const view = await fetchSession(sid)
+        if (cancelled) return
+        setMessages((current) => (sameMessages(current, view.messages) ? current : view.messages))
+        setOrigin((current) =>
+          JSON.stringify(current) === JSON.stringify(view.origin) ? current : view.origin,
+        )
+        setTopic((current) =>
+          JSON.stringify(current) === JSON.stringify(view.topic) ? current : view.topic,
+        )
+      } catch {
+        // 会话可能刚被删除；列表轮询会处理，下一次切换会重新加载
+      }
+    }
+    const timer = window.setInterval(() => void refresh(), 2500)
+    window.addEventListener('focus', refresh)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [topicPageId, coursePageId, streamingId])
+
+  useEffect(() => {
+    void refreshTopics()
+    void refreshCourses()
+    void refreshReminders()
+    const timer = window.setInterval(() => void refreshReminders(), 5 * 60 * 1000)
+    return () => window.clearInterval(timer)
+  }, [refreshTopics, refreshCourses, refreshReminders])
 
   useEffect(() => {
     const term = searchQuery.trim()
@@ -199,17 +384,68 @@ export default function App() {
   }, [searchQuery])
 
   const switchSession = useCallback(async (id: string) => {
-    if (!id || id === sessionRef.current) return
+    if (!id) return
+    if (id === sessionRef.current) {
+      setTopicPageId(null)
+      return
+    }
     try {
       const view = await fetchSession(id)
       localStorage.setItem('studydeck.session', view.id)
       setSessionId(view.id)
       setMessages(view.messages)
+      setOrigin(view.origin ?? null)
+      setTopic(view.topic ?? null)
       setCard(null)
+      setTopicPageId(null)
+      setCoursePageId(null)
+      if (window.innerWidth <= 900) setSidebarOpen(false)
     } catch (err) {
       setError(String(err))
     }
   }, [])
+
+  const newSession = useCallback(async () => {
+    try {
+      const id = await createSession()
+      const view = await fetchSession(id)
+      localStorage.setItem('studydeck.session', view.id)
+      setSessionId(view.id)
+      setMessages([])
+      setOrigin(null)
+      setTopic(null)
+      setCard(null)
+      setTopicPageId(null)
+      setCoursePageId(null)
+      await refreshSessions()
+      if (window.innerWidth <= 900) setSidebarOpen(false)
+    } catch (err) {
+      setError(String(err))
+    }
+  }, [refreshSessions])
+
+  const handleDeleteSession = useCallback(async (id: string) => {
+    try {
+      await deleteSession(id)
+      const recent = await listSessions()
+      setSessions(recent)
+      if (id !== sessionRef.current) return
+      const next = recent.find((item) => item.messages > 0) ?? recent[0]
+      const fresh = next ? next.id : await createSession()
+      const view = await fetchSession(fresh)
+      localStorage.setItem('studydeck.session', view.id)
+      setSessionId(view.id)
+      setMessages(view.messages)
+      setOrigin(view.origin ?? null)
+      setTopic(view.topic ?? null)
+      setCard(null)
+      setTopicPageId(null)
+      setCoursePageId(null)
+      await refreshSessions()
+    } catch (err) {
+      setError(String(err))
+    }
+  }, [refreshSessions])
 
   const refreshGlossary = useCallback(async (search: string) => {
     try {
@@ -223,10 +459,81 @@ export default function App() {
     if (glossaryOpen) void refreshGlossary(query)
   }, [glossaryOpen, query, refreshGlossary])
 
-  const sendMain = useCallback(async (text: string) => {
+  const openTopic = useCallback((id: string) => {
+    setTopicPageId(id)
+    setCoursePageId(null)
+    if (window.innerWidth <= 900) setSidebarOpen(false)
+  }, [])
+
+  const openCourse = useCallback((id: string) => {
+    setCoursePageId(id)
+    setTopicPageId(null)
+    if (window.innerWidth <= 900) setSidebarOpen(false)
+  }, [])
+
+  const refreshWorkspace = useCallback(() => {
+    void refreshSessions()
+    void refreshTopics()
+    void refreshCourses()
+    void refreshReminders()
+  }, [refreshSessions, refreshTopics, refreshCourses, refreshReminders])
+
+  const handleTopicDeleted = useCallback(
+    async () => {
+      setTopicPageId(null)
+      await refreshSessions()
+      await refreshTopics()
+      await refreshCourses()
+      void refreshReminders()
+      const list = await listSessions()
+      setSessions(list)
+      const current = sessionRef.current
+      const stillThere = current ? list.some((item) => item.id === current) : false
+      if (!stillThere) {
+        await newSession()
+        return
+      }
+      try {
+        const view = await fetchSession(current!)
+        setMessages(view.messages)
+        setOrigin(view.origin ?? null)
+        setTopic(view.topic ?? null)
+      } catch {
+        await newSession()
+      }
+    },
+    [refreshSessions, refreshTopics, refreshCourses, refreshReminders, newSession],
+  )
+
+  const submitCourse = useCallback(
+    async (input: {
+      title: string
+      goal: string
+      start_date: string
+      end_date: string
+      daily_minutes: number
+      study_days: string
+    }) => {
+      setCreatingCourse(true)
+      try {
+        const course = await createCourse(input)
+        await refreshCourses()
+        setShowCourseDialog(false)
+        openCourse(course.id)
+      } catch (err) {
+        setError(String(err))
+      } finally {
+        setCreatingCourse(false)
+      }
+    },
+    [openCourse, refreshCourses],
+  )
+
+  const sendMain = useCallback(async (text: string, options?: { saveOutline?: boolean }) => {
     const sid = sessionRef.current
     if (!sid) return
     setError(null)
+    let streamed = ''
 
     const draft: Message = {
       id: `draft-${Date.now()}`,
@@ -256,6 +563,7 @@ export default function App() {
           )
         }
         if (frame.type === 'delta') {
+          streamed += frame.text
           setMessages((current) =>
             current.map((message) =>
               message.id === assistantIdRef.current
@@ -264,15 +572,25 @@ export default function App() {
             ),
           )
         }
+        if (frame.type === 'tool_call') beginTool(frame.name, frame.args)
+        if (frame.type === 'tool_done') finishTool(frame.name, frame.ok)
         if (frame.type === 'error') setError(frame.message)
       })
+
+      if (options?.saveOutline && topic?.id && streamed.trim()) {
+        const updated = await updateTopic(topic.id, { outline_md: streamed })
+        setTopic(updated)
+        await parseTopicOutline(topic.id, streamed).catch(() => [])
+        await refreshTopics()
+      }
     } catch (err) {
       setError(String(err))
     } finally {
       setStreamingId(null)
+      clearTool()
       void refreshSessions()
     }
-  }, [refreshSessions])
+  }, [refreshSessions, refreshTopics, topic, beginTool, finishTool, clearTool])
 
   const runCard = useCallback(
     async (
@@ -281,12 +599,24 @@ export default function App() {
       text: string,
       existingCardId: string | null,
       sourceText: string,
+      append = false,
+      cardHistory?: string,
     ) => {
       const sid = sessionRef.current
       if (!sid) return
       setCard((current) =>
         current
-          ? { ...current, answer: '', streaming: true, depth, question: text, sourceText }
+          ? {
+              ...current,
+              answer:
+                append && current.answer.trim()
+                  ? `${current.answer}\n\n---\n\n**追问：** ${text}\n\n`
+                  : '',
+              streaming: true,
+              depth,
+              question: text,
+              sourceText,
+            }
           : current,
       )
 
@@ -299,6 +629,7 @@ export default function App() {
             anchor,
             depth,
             card_id: existingCardId ?? undefined,
+            card_history: cardHistory,
           },
           (frame) => {
             if (frame.type === 'delta') {
@@ -306,6 +637,8 @@ export default function App() {
                 current ? { ...current, answer: current.answer + frame.text } : current,
               )
             }
+            if (frame.type === 'tool_call') beginTool(frame.name, frame.args)
+            if (frame.type === 'tool_done') finishTool(frame.name, frame.ok)
             if (frame.type === 'error') {
               setCard((current) =>
                 current
@@ -319,6 +652,7 @@ export default function App() {
         setError(String(err))
       } finally {
         setCard((current) => (current ? { ...current, streaming: false } : current))
+        clearTool()
       }
 
       if (!existingCardId) {
@@ -328,13 +662,62 @@ export default function App() {
             .filter((item) => item.anchor.message_id === anchor.message_id && item.anchor.quote === anchor.quote)
             .pop()
           if (matched) cardIdRef.current = matched.id
-          setCard((current) => (current ? { ...current, id: matched?.id ?? null } : current))
+          setCard((current) =>
+            current
+              ? {
+                  ...current,
+                  id: matched?.id ?? null,
+                  promotedSessionId: matched?.promoted_session_id ?? current.promotedSessionId,
+                }
+              : current,
+          )
         } catch {
           // 拿不到 id 也能继续用，只是追问会新开一张卡片
         }
       }
     },
-    [],
+    [beginTool, finishTool, clearTool],
+  )
+
+  const submitPromotion = useCallback(
+    async ({
+      title,
+      depth,
+      topicId,
+    }: {
+      title: string
+      depth: Depth
+      topicId: string | null
+    }) => {
+      if (!promote?.id || !sessionRef.current) return
+      setPromoting(true)
+      try {
+        const result = await promoteCard({
+          session_id: sessionRef.current,
+          card_id: promote.id,
+          title,
+          depth_goal: depth,
+          topic_id: topicId,
+        })
+        const view = await fetchSession(result.session_id)
+        localStorage.setItem('studydeck.session', view.id)
+        setSessionId(view.id)
+        setMessages(view.messages)
+        setOrigin(view.origin ?? result.seed)
+        setTopic(view.topic ?? result.topic)
+        setCard(null)
+        setPromote(null)
+        setTopicPageId(null)
+        await refreshSessions()
+        await refreshTopics()
+        if (window.innerWidth <= 900) setSidebarOpen(false)
+      } catch (err) {
+        setError(String(err))
+      } finally {
+        setPromoting(false)
+      }
+    },
+    [promote, refreshSessions, refreshTopics],
   )
 
   const handleMouseUp = useCallback(() => {
@@ -368,6 +751,7 @@ export default function App() {
       question: anchor.quote,
       rect,
       sourceText,
+      promotedSessionId: null as string | null,
     }
 
     // 命中优先：账本里已经有这个词，就先把旧结论摆出来，别再花一次钱
@@ -388,7 +772,7 @@ export default function App() {
     }
 
     setCard({ ...base, depth: 'can_tune', answer: '', streaming: true, saved: false })
-    void runCard(anchor, 'can_tune', '请解释这段内容。', null, sourceText)
+    void runCard(anchor, 'can_tune', t('请解释这段内容。'), null, sourceText)
   }, [pending, runCard])
 
   const saveCard = useCallback(async () => {
@@ -426,6 +810,7 @@ export default function App() {
   const jumpTo = useCallback(
     async (sessionId: string | null, messageId: string | null) => {
       if (!messageId) return
+      setTopicPageId(null)
       if (sessionId && sessionId !== sessionRef.current) {
         try {
           const view = await fetchSession(sessionId)
@@ -433,6 +818,8 @@ export default function App() {
           setSessionId(view.id)
           setMessages(view.messages)
           setCard(null)
+          setTopicPageId(null)
+          setCoursePageId(null)
         } catch (err) {
           setError(String(err))
           return
@@ -460,70 +847,144 @@ export default function App() {
     )
   }
 
+  const currentTopic = topicPageId
+    ? topics.find((item) => item.id === topicPageId)
+    : null
+  const currentCourse = coursePageId
+    ? courses.find((item) => item.course.id === coursePageId)?.course
+    : null
+  const currentTitle =
+    currentCourse?.title ||
+    currentTopic?.title ||
+    sessions.find((item) => item.id === sessionId)?.title ||
+    topic?.title ||
+    t('未命名')
+
   return (
     <div className="app">
-      <header className="topbar">
-        <span className="brand">study-deck</span>
-        <span className="tagline">不懂就选中它</span>
-        <span className="spacer" />
-        <select
-          className="session-picker"
-          value={sessionId ?? ''}
-          onChange={(event) => void switchSession(event.target.value)}
-          title="切换会话（nvim 投递的会话也会出现在这里）"
-        >
-          {sessions.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.title || '未命名'} · {item.messages}
-            </option>
-          ))}
-        </select>
-        <button
-          title="重命名当前会话"
-          onClick={() => {
-            const current = sessions.find((item) => item.id === sessionId)
-            setRenameValue(current?.title ?? '')
-            setRenaming(sessionId)
-          }}
-        >
-          ✎
-        </button>
-        <button
-          className={confirmDelete ? 'danger' : ''}
-          title={confirmDelete ? '再点一次确认删除' : '删除当前会话'}
-          onClick={() => {
-            if (!sessionId) return
-            if (!confirmDelete) {
-              setConfirmDelete(true)
-              window.setTimeout(() => setConfirmDelete(false), 3000)
-              return
-            }
-            setConfirmDelete(false)
-            void (async () => {
-              await deleteSession(sessionId)
-              const recent = await listSessions()
-              setSessions(recent)
-              const next = recent.find((item) => item.messages > 0) ?? recent[0]
-              const fresh = next ? next.id : await createSession()
-              const view = await fetchSession(fresh)
-              localStorage.setItem('studydeck.session', view.id)
-              setSessionId(view.id)
-              setMessages(view.messages)
-              setCard(null)
-            })()
-          }}
-        >
-          {confirmDelete ? '确认？' : '🗑'}
-        </button>
-        <button onClick={() => setShowSettings(true)}>设置</button>
-        <button onClick={() => setGlossaryOpen((value) => !value)}>
-          {glossaryOpen ? '收起账本' : '账本'}
-        </button>
-      </header>
+      <Sidebar
+        sessions={sessions}
+        topics={topics}
+        courses={courses}
+        activeId={topicPageId || coursePageId ? null : sessionId}
+        activeTopicId={topicPageId}
+        activeCourseId={coursePageId}
+        open={sidebarOpen}
+        onSelect={(id) => void switchSession(id)}
+        onOpenTopic={openTopic}
+        onOpenCourse={openCourse}
+        onNew={() => void newSession()}
+        onNewCourse={() => setShowCourseDialog(true)}
+        onRename={(id) => {
+          const current = sessions.find((item) => item.id === id)
+          setRenameValue(current?.title ?? '')
+          setRenaming(id)
+        }}
+        onDelete={(id) => void handleDeleteSession(id)}
+        onClose={() => setSidebarOpen(false)}
+      />
 
-      {fake && <div className="banner">演示模式：后端未配置模型，返回的是脚本内容</div>}
+      <div className="workspace">
+        <header className="topbar">
+          <button
+            className="icon"
+            title="会话侧边栏"
+            onClick={() => setSidebarOpen((value) => !value)}
+          >
+            ☰
+          </button>
+          <div className="topbar-context">
+            <span className="topbar-kicker">
+              {coursePageId ? t('课程') : topicPageId ? t('专题') : t('会话')}
+            </span>
+            <span className="current-title">{currentTitle}</span>
+            {!topicPageId && topic && <span className="topic-chip">{t('专题')}</span>}
+          </div>
+          <span className="spacer" />
+          <span className="topbar-model" title={t('当前对话模型')}>
+            <span className="status-dot" />
+            {settings?.model || t('未配置模型')}
+          </span>
+          <button className="ghost" onClick={() => setShowSettings(true)}>{t('设置')}</button>
+          {!topicPageId && !coursePageId && (
+            <button onClick={() => setGlossaryOpen((value) => !value)}>
+              {glossaryOpen ? t('收起账本') : t('账本')}
+            </button>
+          )}
+        </header>
 
-      <main className={`main ${glossaryOpen ? 'with-drawer' : ''}`}>
+        {fake && <div className="banner">{t('演示模式：后端未配置模型，返回的是脚本内容')}</div>}
+
+        {toolActivity && (
+          <div className={`tool-activity ${toolActivity.state}`} role="status" aria-live="polite">
+            <span className="tool-spinner" />
+            <span>
+              {toolActivity.state === 'running'
+                ? toolLabel(toolActivity.name, toolActivity.args, t)
+                : toolActivity.ok
+                  ? t('已完成项目读取')
+                  : t('项目读取失败')}
+            </span>
+          </div>
+        )}
+
+        {dueReminders.length > 0 && !reminderDismissed && (
+          <div className="reminder-banner">
+            <span>
+              {t('今天有 {n} 个学习任务待完成：', { n: dueReminders.length })}
+              {dueReminders
+                .slice(0, 3)
+                .map((item) => item.topic?.title || item.course_title)
+                .join('、')}
+              {dueReminders.length > 3 ? '…' : ''}
+            </span>
+            <button
+              onClick={() => {
+                openCourse(dueReminders[0].course_id)
+                setReminderDismissed(true)
+              }}
+            >
+              {t('查看')}
+            </button>
+            <button className="icon" onClick={() => setReminderDismissed(true)}>
+              ×
+            </button>
+          </div>
+        )}
+
+        {coursePageId ? (
+          <CoursePage
+            courseId={coursePageId}
+            topics={topics}
+            onBack={() => setCoursePageId(null)}
+            onOpenTopic={openTopic}
+            onChanged={refreshWorkspace}
+          />
+        ) : topicPageId ? (
+          <TopicPage
+            topicId={topicPageId}
+            sessions={sessions}
+            topics={topics}
+            onBack={() => setTopicPageId(null)}
+            onOpenSession={(id) => void switchSession(id)}
+            onJump={(sid, mid) => void jumpTo(sid, mid)}
+            onChanged={refreshWorkspace}
+            onDeleted={() => void handleTopicDeleted()}
+          />
+        ) : (
+          <>
+            {origin && (
+              <OriginBanner
+                origin={origin}
+                topic={topic}
+                canOutline={!!topic && messages.length === 0}
+                busy={streamingId !== null}
+                onBack={() => void jumpTo(origin.source_session_id, origin.source_message_id)}
+                onOutline={() => void sendMain(t(OUTLINE_PROMPT), { saveOutline: true })}
+              />
+            )}
+
+            <main className={`main ${glossaryOpen ? 'with-drawer' : ''}`}>
         <section className="chat">
           <MessageList
             messages={messages}
@@ -531,7 +992,7 @@ export default function App() {
             flashId={flashId}
             onMouseUp={handleMouseUp}
           />
-          <Composer disabled={!sessionId || streamingId !== null} onSend={sendMain} examples={EXAMPLES} />
+          <Composer disabled={!sessionId || streamingId !== null} onSend={sendMain} examples={EXAMPLES.map((item) => t(item))} />
         </section>
 
         {glossaryOpen && (
@@ -547,15 +1008,31 @@ export default function App() {
             onSearchQuery={setSearchQuery}
           />
         )}
-      </main>
+            </main>
+          </>
+        )}
+      </div>
 
       {pending && (
         <button
           className="explain-btn"
-          style={{ left: pending.rect.left, top: Math.max(8, pending.rect.top - 40) }}
+          style={{
+            left: Math.min(
+              Math.max(8, pending.rect.left),
+              window.innerWidth - 140,
+            ),
+            top:
+              pending.rect.top < 56
+                ? Math.min(
+                    Math.max(8, pending.rect.top + pending.rect.height + 8),
+                    window.innerHeight - 48,
+                  )
+                : Math.max(8, pending.rect.top - 8),
+            transform: pending.rect.top < 56 ? 'none' : 'translateY(-100%)',
+          }}
           onClick={openCard}
         >
-          解释这段
+          {t('解释选中内容')}
         </button>
       )}
 
@@ -568,21 +1045,57 @@ export default function App() {
         }}
         onFollowUp={(text) => {
           if (!card) return
-          void runCard(card.anchor, card.depth, text, cardIdRef.current ?? card.id, card.sourceText)
+          void runCard(
+            card.anchor,
+            card.depth,
+            text,
+            cardIdRef.current ?? card.id,
+            card.sourceText,
+            true,
+            card.answer,
+          )
         }}
         onSave={() => void saveCard()}
         onRegenerate={() => {
           if (!card) return
           setCard({ ...card, saved: false })
-          void runCard(card.anchor, card.depth, '请重新解释这段内容。', cardIdRef.current ?? card.id, card.sourceText)
+          void runCard(card.anchor, card.depth, t('请重新解释这段内容。'), cardIdRef.current ?? card.id, card.sourceText)
+        }}
+        onPromote={() => {
+          if (card) setPromote(card)
+        }}
+        onOpenPromoted={() => {
+          if (!card?.promotedSessionId) return
+          const id = card.promotedSessionId
+          setCard(null)
+          void switchSession(id)
         }}
       />
+
+      {promote && (
+        <PromoteDialog
+          card={promote}
+          parentTitle={sessions.find((item) => item.id === sessionId)?.title ?? ''}
+          topics={topics}
+          busy={promoting}
+          onCancel={() => setPromote(null)}
+          onSubmit={(input) => void submitPromotion(input)}
+        />
+      )}
+
+      {showCourseDialog && (
+        <CourseDialog
+          busy={creatingCourse}
+          onCancel={() => setShowCourseDialog(false)}
+          onSubmit={(input) => void submitCourse(input)}
+        />
+      )}
 
       {renaming && (
         <div className="modal-backdrop" onClick={() => setRenaming(null)}>
           <div className="modal narrow" onClick={(event) => event.stopPropagation()}>
             <header className="modal-head">
-              <strong>重命名会话</strong>
+              <strong>{t('重命名会话')}</strong>
               <button className="icon" onClick={() => setRenaming(null)}>
                 ×
               </button>
@@ -591,10 +1104,10 @@ export default function App() {
               className="rename-input"
               autoFocus
               value={renameValue}
-              placeholder="比如：Rust 所有权"
+              placeholder={t('比如：Rust 所有权')}
               onChange={(event) => setRenameValue(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter') {
+                if (event.key === 'Enter' && !isImeComposing(event)) {
                   void (async () => {
                     await renameSession(renaming, renameValue)
                     setRenaming(null)
@@ -614,7 +1127,7 @@ export default function App() {
                   })()
                 }}
               >
-                保存
+                {t('保存')}
               </button>
             </div>
           </div>

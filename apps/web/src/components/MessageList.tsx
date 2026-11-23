@@ -27,9 +27,9 @@ export function MessageList({ messages, streamingId, flashId, onMouseUp }: Props
     <div className="messages" ref={containerRef} onMouseUp={onMouseUp}>
       {messages.length === 0 && (
         <div className="empty">
-          <h2>从一句你真正卡住的问题开始</h2>
+          <h2>从一个具体问题开始</h2>
           <p>
-            回答里出现不懂的词，直接选中它 —— 会浮出一张卡片，就地展开，主线不受影响。
+            选中回答中的任意内容，可打开卡片就地解释；主线对话不会被打断。
           </p>
         </div>
       )}

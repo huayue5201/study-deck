@@ -85,7 +85,11 @@ impl Provider for FakeProvider {
         let mut text = String::new();
         for chunk in chunk_text(&body, 24) {
             if cancel.is_cancelled() {
-                return Ok(StreamOutcome { text, tool_calls: Vec::new(), usage: Usage::default() });
+                return Ok(StreamOutcome {
+                    text,
+                    tool_calls: Vec::new(),
+                    usage: Usage::default(),
+                });
             }
             text.push_str(&chunk);
             let _ = tx.send(AgentEvent::Delta { text: chunk });
@@ -100,7 +104,10 @@ impl Provider for FakeProvider {
         Ok(StreamOutcome {
             text,
             tool_calls: Vec::new(),
-            usage: Usage { prompt_tokens: 0, completion_tokens: 0 },
+            usage: Usage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+            },
         })
     }
 }

@@ -2,9 +2,9 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use studydeck_core::{AgentEvent, Usage};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use studydeck_core::{AgentEvent, Usage};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -126,7 +126,8 @@ impl Provider for OpenAiCompat {
                     if let Some(usage) = value.get("usage") {
                         outcome.usage = Usage {
                             prompt_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-                            completion_tokens: usage["completion_tokens"].as_u64().unwrap_or(0) as u32,
+                            completion_tokens: usage["completion_tokens"].as_u64().unwrap_or(0)
+                                as u32,
                         };
                     }
 
@@ -137,7 +138,9 @@ impl Provider for OpenAiCompat {
                     if let Some(content) = choice["delta"]["content"].as_str() {
                         if !content.is_empty() {
                             outcome.text.push_str(content);
-                            let _ = tx.send(AgentEvent::Delta { text: content.to_string() });
+                            let _ = tx.send(AgentEvent::Delta {
+                                text: content.to_string(),
+                            });
                         }
                     }
 
@@ -171,7 +174,11 @@ impl Provider for OpenAiCompat {
                 continue;
             }
             outcome.tool_calls.push(ToolCall {
-                id: if id.is_empty() { format!("call_{index}") } else { id },
+                id: if id.is_empty() {
+                    format!("call_{index}")
+                } else {
+                    id
+                },
                 name,
                 arguments: serde_json::from_str(&args).unwrap_or(Value::Null),
             });

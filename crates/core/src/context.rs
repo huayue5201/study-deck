@@ -1,9 +1,12 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
     anchor::Anchor,
     card::{Card, Depth},
     session::Message,
+    topic::{SessionSeed, Topic},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,6 +24,14 @@ pub struct TurnRequest {
     pub depth: Option<Depth>,
     /// 已经存在的卡片，用于卡片内的追问
     pub parent_card: Option<Card>,
+    /// 卡片内此前的追问/回答，用于多轮卡片对话。
+    pub card_history: Option<String>,
+    /// 当前会话所属专题；普通会话为 None。
+    pub topic: Option<Topic>,
+    /// 从阅读支线升级到专题时携带的起点包；普通会话为 None。
+    pub seed: Option<SessionSeed>,
+    /// 本次会话所属项目根目录；存在时开放只读文件工具。
+    pub project_root: Option<PathBuf>,
     pub history: Vec<Message>,
 }
 
@@ -49,13 +60,22 @@ pub struct Block {
 
 impl Block {
     pub fn system(text: impl Into<String>) -> Self {
-        Self { role: BlockRole::System, text: text.into() }
+        Self {
+            role: BlockRole::System,
+            text: text.into(),
+        }
     }
     pub fn user(text: impl Into<String>) -> Self {
-        Self { role: BlockRole::User, text: text.into() }
+        Self {
+            role: BlockRole::User,
+            text: text.into(),
+        }
     }
     pub fn assistant(text: impl Into<String>) -> Self {
-        Self { role: BlockRole::Assistant, text: text.into() }
+        Self {
+            role: BlockRole::Assistant,
+            text: text.into(),
+        }
     }
 }
 

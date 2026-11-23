@@ -1,12 +1,7 @@
 //! 桌面壳：把 HTTP 服务与内嵌前端装进一个 .app。
 //! 端口交给系统分配，握手文件（port/pid/api/caps/token）写在应用数据目录里。
 
-use std::{
-    net::SocketAddr,
-    path::PathBuf,
-    sync::OnceLock,
-    time::Duration,
-};
+use std::{net::SocketAddr, path::PathBuf, sync::OnceLock, time::Duration};
 
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
@@ -117,15 +112,12 @@ fn main() {
                     }
                 };
 
-                if let Err(err) = WebviewWindowBuilder::new(
-                    &handle,
-                    "main",
-                    WebviewUrl::External(parsed),
-                )
-                .title("StudyDeck")
-                .inner_size(1320.0, 880.0)
-                .min_inner_size(900.0, 600.0)
-                .build()
+                if let Err(err) =
+                    WebviewWindowBuilder::new(&handle, "main", WebviewUrl::External(parsed))
+                        .title("StudyDeck")
+                        .inner_size(1320.0, 880.0)
+                        .min_inner_size(900.0, 600.0)
+                        .build()
                 {
                     tracing::error!("window failed: {err}");
                 }

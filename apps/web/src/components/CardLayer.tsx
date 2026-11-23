@@ -8,9 +8,20 @@ interface Props {
   onFollowUp: (text: string) => void
   onSave: () => void
   onRegenerate: () => void
+  onPromote: () => void
+  onOpenPromoted: () => void
 }
 
-export function CardLayer({ card, onClose, onDepthChange, onFollowUp, onSave, onRegenerate }: Props) {
+export function CardLayer({
+  card,
+  onClose,
+  onDepthChange,
+  onFollowUp,
+  onSave,
+  onRegenerate,
+  onPromote,
+  onOpenPromoted,
+}: Props) {
   if (!card) return null
   return (
     <div className="card-layer">
@@ -21,6 +32,8 @@ export function CardLayer({ card, onClose, onDepthChange, onFollowUp, onSave, on
         onFollowUp={onFollowUp}
         onSave={onSave}
         onRegenerate={onRegenerate}
+        onPromote={onPromote}
+        onOpenPromoted={onOpenPromoted}
       />
     </div>
   )

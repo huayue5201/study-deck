@@ -29,17 +29,6 @@ pub enum TurnState {
     Cancelled,
 }
 
-impl TurnState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TurnState::Running => "running",
-            TurnState::Ok => "ok",
-            TurnState::Error => "error",
-            TurnState::Cancelled => "cancelled",
-        }
-    }
-}
-
 pub struct Turn {
     pub id: String,
     pub session_id: String,
@@ -135,8 +124,15 @@ impl Registry {
             }
         }
         let id = uuid::Uuid::new_v4().to_string();
-        let turn = Arc::new(Mutex::new(Turn::new(id.clone(), session_id.to_string(), question.to_string())));
-        self.turns.lock().expect("turns poisoned").insert(id.clone(), turn.clone());
+        let turn = Arc::new(Mutex::new(Turn::new(
+            id.clone(),
+            session_id.to_string(),
+            question.to_string(),
+        )));
+        self.turns
+            .lock()
+            .expect("turns poisoned")
+            .insert(id.clone(), turn.clone());
         active.insert(session_id.to_string(), id);
         Ok(turn)
     }
@@ -158,7 +154,10 @@ impl Registry {
             guard.error = error;
             (guard.id.clone(), guard.session_id.clone())
         };
-        self.active.lock().expect("active poisoned").remove(&session_id);
+        self.active
+            .lock()
+            .expect("active poisoned")
+            .remove(&session_id);
 
         let _ = id;
     }

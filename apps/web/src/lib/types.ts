@@ -27,12 +27,79 @@ export interface CardRecord {
   question: string
   answer: string
   created_at: string
+  promoted_session_id?: string | null
+}
+
+export interface Topic {
+  id: string
+  title: string
+  summary: string
+  depth_goal: Depth
+  mastery: Mastery
+  created_at: string
+  outline_md: string
+  metadata?: Record<string, unknown>
+}
+
+export type TopicEdgeKind = 'prerequisite' | 'part_of' | 'related'
+
+export interface TopicRelation {
+  id: string
+  kind: TopicEdgeKind
+  kind_label: string
+  direction: 'incoming' | 'outgoing' | 'related'
+  note: string
+  other: Topic | null
+}
+
+export interface TopicSuggestion {
+  title: string
+  topic_id: string | null
+}
+
+export interface TopicDetail {
+  topic: Topic
+  sessions: SessionSummary[]
+  relations: TopicRelation[]
+  suggestions: TopicSuggestion[]
+  source: SessionOrigin | null
+  nodes: TopicNode[]
+  course_count: number
+}
+
+export type TopicNodeStatus = 'planned' | 'learning' | 'done'
+
+export interface TopicNode {
+  id: string
+  topic_id: string
+  title: string
+  status: TopicNodeStatus
+  position: number
+  note: string
+  created_at: string
+}
+
+export interface SessionOrigin {
+  session_id: string
+  topic_id: string
+  topic_title: string
+  source_session_id: string
+  source_title: string | null
+  source_message_id: string
+  card_id: string
+  quote: string
+  context: string
+  answer: string
+  depth: Depth
+  metadata?: Record<string, unknown>
 }
 
 export interface SessionView {
   id: string
   messages: Message[]
   cards: CardRecord[]
+  topic: Topic | null
+  origin: SessionOrigin | null
 }
 
 export type Mastery = 'unknown' | 'learning' | 'mastered'
@@ -80,6 +147,7 @@ export interface ChatBody {
   anchor?: Anchor
   depth?: Depth
   card_id?: string
+  card_history?: string
 }
 
 export interface Health {
@@ -128,6 +196,22 @@ export interface SessionSummary {
   title: string | null
   updated_at: string
   messages: number
+  topic_id: string | null
+  topic_title: string | null
+  origin: {
+    parent_session_id: string
+    parent_title: string | null
+    message_id: string
+    card_id: string
+    quote: string
+  } | null
+}
+
+export interface PromotionResult {
+  session_id: string
+  topic_id: string
+  topic: Topic
+  seed: SessionOrigin
 }
 
 export interface TurnView {
@@ -140,4 +224,64 @@ export interface TurnView {
   question: string
   error: string | null
   message_id: string | null
+}
+
+export type CourseItemStatus = 'planned' | 'learning' | 'done'
+
+export interface Course {
+  id: string
+  title: string
+  goal: string
+  start_date: string | null
+  end_date: string | null
+  daily_minutes: number
+  study_days: string
+  created_at: string
+  metadata?: Record<string, unknown>
+}
+
+export interface CourseItem {
+  id: string
+  course_id: string
+  topic_id: string
+  position: number
+  planned_at: string | null
+  status: CourseItemStatus
+  note: string
+  estimated_minutes: number
+  created_at: string
+  metadata?: Record<string, unknown>
+}
+
+export interface CoursePrerequisite {
+  topic_id: string
+  title: string
+  in_course: boolean
+  warning: string
+}
+
+export interface CourseDetailItem {
+  item: CourseItem
+  topic: Topic | null
+  prerequisites: CoursePrerequisite[]
+}
+
+export interface CourseSummary {
+  course: Course
+  topic_count: number
+  done_count: number
+  next_date: string | null
+}
+
+export interface CourseDetail {
+  course: Course
+  items: CourseDetailItem[]
+  progress: { total: number; done: number }
+}
+
+export interface Reminder {
+  course_id: string
+  course_title: string
+  item: CourseItem
+  topic: Topic | null
 }

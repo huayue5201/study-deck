@@ -12,6 +12,12 @@
 - **可以当别人的 agent**：`studydeck://` 深链 + `POST /api/ask`，`ask-agent.nvim` 里
   deck 和 pi / claude 平级（见 [docs/PROTOCOL.md](docs/PROTOCOL.md)）
 - **本地优先**：对话直接发给你自己填的模型服务商，不经过任何中转；Key 进钥匙串
+- **支线可以升级**：一张卡片解释不动时，升级成「专题会话」系统学；左侧栏管理所有会话，保留来源回链
+- **专题能长大**：专题可挂多个会话、保存学习地图、编辑先修/相关关系
+- **课程和课表**：把专题按先修关系排成学习路径，按日期排课；一键按先修关系拓扑排序
+- **提醒与日历**：今日任务提醒、课程 `.ics` 导出（含 VALARM），拖拽排序，按每天可用分钟自动排期
+- **只读项目工具**：`/api/ask` 的 cwd 会成为会话项目根；模型可用 `read_file` / `list_dir` / `search_text` 按需读代码
+- **中英文界面**：设置里可切换中文 / English；语言通过 cookie 持久化，应用换端口重启后仍保留
 
 ```
 macOS 桌面版（自带服务与前端） · Rust + axum + SQLite · React + TS · Tauri 2
@@ -55,6 +61,64 @@ cargo run -p server                  # 打开 http://127.0.0.1:8787
 | **账本**（术语 → 一句话结论 → 深度 → 来源锚点，FTS5 可检索） | `crates/store` + `GlossaryEntry` |
 | **深度预算**（卡片只允许一层嵌套） | `core::NestingPolicy` |
 
+## 支线升级：Card → Topic → Session
+
+卡片仍然只展开一层。遇到需要系统化的概念，点卡片里的「升级为专题」：
+
+1. 新建一个 `Topic`（标题、摘要、目标深度、掌握度）。
+2. 新建一个 `Session` 挂在 Topic 下，并保存来源包：原会话、原消息、锚点、卡片结论。
+3. 原卡片记录 `promoted_session_id`，顶部来源条可一键回到原消息。
+4. 同一张卡重复升级是幂等的，不会产生重复专题。
+
+新会话的第一轮只带“起点包”，不复制父会话历史；模型会先给 3–5 条学习地图，再按用户确认展开。
+`topics.metadata`、`session_seeds.metadata` 和 `session_links.kind` 是扩展点：插件可以挂自己的数据，
+不需要改表结构。
+
+## 专题工作区
+
+专题不是标签，而是一个可以持续生长的对象：
+
+- **多个会话**：新建会话、关联已有会话、移出专题
+- **学习地图**：保存 Markdown，并拆成可勾选的结构化节点
+- **关系 v1**：先修 / 相关；添加先修时做环检测
+- **来源**：保留升级时的原会话、原消息和锚点
+- **删除专题**：可选保留会话（转为普通会话）或连同会话一起删除；会清理节点、关系、课程引用，账本保留
+
+关系方向按学习顺序定义：`from` 是先修/前置，`to` 是依赖方。课程和课表可以在这个关系图上继续做，不需要改现有专题结构。
+
+## 课程与课表
+
+课程是专题之上的组织层：
+
+- 一个课程包含有序的专题（`course_items`）
+- 每个条目有：位置、计划日期、状态（未开始 / 在学 / 已完成）、备注
+- **按先修排序**：用 `topic_edges` 的 `prerequisite` 边做拓扑排序，环会保留原顺序并提示
+- **课表**：按计划日期分组；未排期的单独一组；可一键从课程开始日期起每周排一项
+- 进度：完成数 / 总数
+- **拖拽排序**：拖动行首 `≡` 可直接重排，上下按钮仍保留
+- **按容量排期**：设置每天可用分钟和学习日；同一天可以安排多个专题，直到当天预算用完
+- **今日提醒**：应用内提醒今天/逾期未完成的任务
+- **导出日历**：课程 `.ics` 可导入 macOS 日历，事件带 VALARM 提醒
+- 删除课程只删课程和条目，不删专题、会话或账本
+
+## 项目只读工具
+
+当会话来自 `/api/ask`（例如 nvim 插件）时，`cwd` 会绑定成该会话的项目根目录。Agent 会多出三个只读工具：
+
+- `read_file(path, start_line?, max_lines?)`
+- `list_dir(path?)`
+- `search_text(query, glob?, max_results?)`
+
+安全边界：
+
+- 路径必须先 canonicalize，且仍在项目根内
+- 拒绝 `..` 和 symlink 逃逸
+- 拒绝 `.env`、`.ssh`、`.git`、密钥等敏感文件
+- 只读，不提供写入/执行/删除
+- 单文件、命中数、遍历文件数都有上限
+
+普通 App 会话没有 cwd 时不会开放这些工具。
+
 ## 结构
 
 ```
@@ -90,7 +154,8 @@ Key 优先写入 **macOS 钥匙串**；钥匙串不可用时退化成 `600` 权�
 | DELETE | `/api/settings/key` | 清除已保存的 Key |
 | GET | `/api/providers` | 内置服务商预设（DeepSeek / OpenAI / OpenRouter / 自定义） |
 | GET | `/api/sessions` | 最近会话（UI 的会话切换器用） |
-| POST | `/api/ask` | 外部投递：`{text, cwd?}`，同一 cwd 复用同一条会话，SSE 回传 |
+| POST | `/api/ask` | 外部投递：`{text, cwd?, session_id?}`；显式 `session_id` 优先，否则按 cwd 复用；SSE 回传 |
+| GET | `/api/sessions/resolve?cwd=` | 解析 cwd 当前绑定的会话，不创建新会话 |
 
 服务启动时端口传 `127.0.0.1:0`，由系统分配，桌面壳再把真实地址交给窗口——
 所以不会再出现“8787 被占用导致白屏”。
@@ -208,6 +273,33 @@ cp .env.example .env      # 填 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL
 | POST | `/api/sessions` | 新建会话 |
 | GET | `/api/sessions/{id}` | 会话 + 消息 + 卡片 |
 | POST | `/api/chat` | SSE 流；`mode: "main" \| "card"` |
+| POST | `/api/sessions/{id}/promote` | 卡片升级为专题会话（幂等，可并入已有专题） |
+| PATCH | `/api/sessions/{id}/topic` | 关联/移出专题 |
+| GET | `/api/topics` | 专题列表 |
+| POST | `/api/topics` | 手动创建专题 |
+| GET | `/api/topics/{id}` | 专题详情：会话、来源、关系、建议 |
+| PATCH | `/api/topics/{id}` | 改标题/摘要/深度/掌握度/学习地图 |
+| POST | `/api/topics/{id}/sessions` | 在专题下新建会话 |
+| POST | `/api/topics/{id}/edges` | 添加先修/相关关系 |
+| DELETE | `/api/topics/{id}/edges/{edge_id}` | 删除关系 |
+| DELETE | `/api/topics/{id}?delete_sessions=true\|false` | 删除专题；默认保留会话 |
+| GET | `/api/courses` | 课程列表 + 进度 |
+| POST | `/api/courses` | 新建课程 |
+| GET | `/api/courses/{id}` | 课程详情 + 先修警告 |
+| PATCH | `/api/courses/{id}` | 改课程名/目标/起止日期 |
+| DELETE | `/api/courses/{id}` | 删除课程 |
+| POST | `/api/courses/{id}/items` | 加入专题 |
+| PATCH | `/api/courses/{id}/items/{item_id}` | 改日期/状态/备注/位置 |
+| DELETE | `/api/courses/{id}/items/{item_id}` | 移出专题 |
+| POST | `/api/courses/{id}/reorder` | 手动排序 |
+| POST | `/api/courses/{id}/auto-order` | 按先修关系自动排序 |
+| POST | `/api/courses/{id}/auto-schedule` | 按每天可用分钟和学习日自动排期 |
+| GET | `/api/courses/{id}/calendar.ics` | 导出课程日历（含提醒） |
+| GET | `/api/reminders` | 今天/逾期未完成任务 |
+| POST | `/api/topics/{id}/outline/parse` | 把 Markdown 学习地图拆成节点 |
+| POST | `/api/topics/{id}/nodes` | 添加学习节点 |
+| PATCH | `/api/topics/{id}/nodes/{node_id}` | 改节点状态/标题/备注 |
+| DELETE | `/api/topics/{id}/nodes/{node_id}` | 删除节点 |
 | GET | `/api/glossary?q=` | 账本检索（FTS5，失败自动退化 LIKE） |
 | POST | `/api/glossary` | 新增账本条目 |
 | GET | `/api/turns?active=1` | 轮次列表（状态机） |

@@ -40,7 +40,8 @@ pub async fn run_turn(
         })
         .collect();
 
-    let specs = tool::specs();
+    let tool_ctx = tool::ToolContext::new(request.project_root.clone());
+    let specs = tool::specs(tool_ctx.enabled());
     let mut outcome = TurnOutcome::default();
 
     for round in 0..4 {
@@ -102,7 +103,7 @@ pub async fn run_turn(
                 args: call.arguments.clone(),
             });
 
-            let (ok, result) = match tool::execute(&call.name, &call.arguments).await {
+            let (ok, result) = match tool::execute(&call.name, &call.arguments, &tool_ctx).await {
                 Ok(value) => (true, value),
                 Err(err) => (false, format!("工具执行失败：{err}")),
             };
@@ -117,10 +118,14 @@ pub async fn run_turn(
     }
 
     if outcome.cancelled {
-        let _ = tx.send(AgentEvent::Done { usage: outcome.usage });
+        let _ = tx.send(AgentEvent::Done {
+            usage: outcome.usage,
+        });
         return Ok(outcome);
     }
 
-    let _ = tx.send(AgentEvent::Done { usage: outcome.usage });
+    let _ = tx.send(AgentEvent::Done {
+        usage: outcome.usage,
+    });
     Ok(outcome)
 }

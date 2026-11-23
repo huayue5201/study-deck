@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { useI18n } from '../lib/i18n'
+import { isImeComposing } from '../lib/ime'
 
 interface Props {
   disabled: boolean
@@ -7,6 +9,7 @@ interface Props {
 }
 
 export function Composer({ disabled, onSend, examples = [] }: Props) {
+  const { t } = useI18n()
   const [value, setValue] = useState('')
 
   const submit = () => {
@@ -30,18 +33,18 @@ export function Composer({ disabled, onSend, examples = [] }: Props) {
       <div className="composer-row">
         <textarea
           value={value}
-          placeholder="问点什么…（Enter 发送，Shift+Enter 换行）"
+          placeholder={t('输入问题…（Enter 发送，Shift+Enter 换行）')}
           rows={3}
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
+            if (event.key === 'Enter' && !event.shiftKey && !isImeComposing(event)) {
               event.preventDefault()
               submit()
             }
           }}
         />
         <button className="send" onClick={submit} disabled={disabled || !value.trim()}>
-          发送
+          {t('发送')}
         </button>
       </div>
     </div>

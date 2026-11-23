@@ -7,7 +7,10 @@ pub struct NestingPolicy {
 
 impl Default for NestingPolicy {
     fn default() -> Self {
-        Self { max_card_depth: 1, max_context_chars: 1200 }
+        Self {
+            max_card_depth: 1,
+            max_context_chars: 1200,
+        }
     }
 }
 
