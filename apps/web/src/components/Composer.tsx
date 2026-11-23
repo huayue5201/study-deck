@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useI18n } from '../lib/i18n'
 import { isImeComposing } from '../lib/ime'
 
@@ -6,9 +6,11 @@ interface Props {
   disabled: boolean
   onSend: (text: string) => void
   examples?: string[]
+  /** 输入框下方的状态行：模型、token 等 */
+  status?: ReactNode
 }
 
-export function Composer({ disabled, onSend, examples = [] }: Props) {
+export function Composer({ disabled, onSend, examples = [], status }: Props) {
   const { t } = useI18n()
   const [value, setValue] = useState('')
 
@@ -47,6 +49,7 @@ export function Composer({ disabled, onSend, examples = [] }: Props) {
           {t('发送')}
         </button>
       </div>
+      {status && <div className="composer-status">{status}</div>}
     </div>
   )
 }

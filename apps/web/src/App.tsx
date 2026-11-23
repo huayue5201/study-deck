@@ -174,6 +174,7 @@ export default function App() {
   const [presets, setPresets] = useState<ProviderPreset[]>([])
   const [settings, setSettings] = useState<SettingsView | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
   const [showProfiles, setShowProfiles] = useState(false)
   const [profiles, setProfiles] = useState<CardProfile[]>([])
   const [activeProfile, setActiveProfile] = useState<CardProfile>(FALLBACK_PROFILE)
@@ -510,6 +511,22 @@ export default function App() {
       deletingRef.current.delete(id)
     }
   }, [refreshSessions])
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDown = (event: PointerEvent) => {
+      if (!(event.target as HTMLElement).closest('.menu-wrap')) setMenuOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMenuOpen(false)
+    }
+    window.addEventListener('pointerdown', onDown)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', onDown)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [menuOpen])
 
   const refreshGlossary = useCallback(async (search: string) => {
     try {
@@ -937,6 +954,10 @@ export default function App() {
 
   return (
     <div className="app">
+      {sidebarOpen && (
+        <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
+      )}
+
       <Sidebar
         sessions={sessions}
         topics={topics}
@@ -963,38 +984,65 @@ export default function App() {
         <header className="topbar">
           <button
             className="icon"
-            title="会话侧边栏"
+            title={t('会话侧边栏')}
             onClick={() => setSidebarOpen((value) => !value)}
           >
             ☰
           </button>
+
           <div className="topbar-context">
             <span className="topbar-kicker">
               {coursePageId ? t('课程') : topicPageId ? t('专题') : t('会话')}
             </span>
-            <span className="current-title">{currentTitle}</span>
+            <span className="current-title" title={currentTitle}>
+              {currentTitle}
+            </span>
             {!topicPageId && topic && <span className="topic-chip">{t('专题')}</span>}
           </div>
-          <span className="spacer" />
-          {usage && usage.total_tokens > 0 && (
-            <span
-              className="topbar-usage"
-              title={t('本会话累计 token')}
-            >
-              {formatTokens(usage.total_tokens)} tokens
-            </span>
-          )}
-          <span className="topbar-model" title={t('当前对话模型')}>
-            <span className="status-dot" />
-            {settings?.model || t('未配置模型')}
-          </span>
-          <button className="ghost" onClick={() => setShowProfiles(true)}>{t('卡片模板')}</button>
-          <button className="ghost" onClick={() => setShowSettings(true)}>{t('设置')}</button>
-          {!topicPageId && !coursePageId && (
-            <button onClick={() => setGlossaryOpen((value) => !value)}>
-              {glossaryOpen ? t('收起账本') : t('账本')}
-            </button>
-          )}
+
+          <div className="topbar-actions">
+            {!topicPageId && !coursePageId && (
+              <button
+                className={glossaryOpen ? 'ghost active' : 'ghost'}
+                onClick={() => setGlossaryOpen((value) => !value)}
+              >
+                {glossaryOpen ? t('收起账本') : t('账本')}
+              </button>
+            )}
+            <div className="menu-wrap">
+              <button
+                className={menuOpen ? 'ghost active' : 'ghost'}
+                title={t('更多')}
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                onClick={() => setMenuOpen((value) => !value)}
+              >
+                ⋯
+              </button>
+              {menuOpen && (
+                <div className="menu" role="menu">
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false)
+                      setShowProfiles(true)
+                    }}
+                  >
+                    {t('卡片模板')}
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false)
+                      setShowSettings(true)
+                    }}
+                  >
+                    {t('设置')}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
         </header>
 
         {fake && <div className="banner">{t('演示模式：后端未配置模型，返回的是脚本内容')}</div>}
@@ -1076,7 +1124,24 @@ export default function App() {
             flashId={flashId}
             onMouseUp={handleMouseUp}
           />
-          <Composer disabled={!sessionId || streamingId !== null} onSend={sendMain} examples={EXAMPLES.map((item) => t(item))} />
+          <Composer
+            disabled={!sessionId || streamingId !== null}
+            onSend={sendMain}
+            examples={EXAMPLES.map((item) => t(item))}
+            status={
+              <>
+                <span className="status-model" title={t('当前对话模型')}>
+                  <span className="status-dot" />
+                  {settings?.model || t('未配置模型')}
+                </span>
+                {usage && usage.total_tokens > 0 && (
+                  <span className="status-usage" title={t('本会话累计 token')}>
+                    {formatTokens(usage.total_tokens)} tokens
+                  </span>
+                )}
+              </>
+            }
+          />
         </section>
 
         {glossaryOpen && (

@@ -30,6 +30,7 @@ const EN: Record<string, string> = {
   '最近': 'Recent',
   '本地工作区 · 自动保存': 'Local workspace · Autosaved',
   '设置': 'Settings',
+  '更多': 'More',
   '账本': 'Ledger',
   '本会话累计 token': 'Tokens used in this chat',
   '收起账本': 'Close ledger',
