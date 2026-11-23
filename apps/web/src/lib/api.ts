@@ -10,7 +10,7 @@ import type {
   CardProfile,
   ChatBody,
   Depth,
-  Encounter,
+  EntryDetail,
   GlossaryEntry,
   Health,
   Mastery,
@@ -170,6 +170,7 @@ export async function saveGlossary(input: {
   profile_id?: string
   level?: string
   parent_card_id?: string
+  card_id?: string
 }): Promise<GlossaryEntry> {
   return readJson<GlossaryEntry>(
     await api('/api/glossary', {
@@ -238,7 +239,7 @@ export async function updateEntry(
   patch: { gist?: string; depth?: Depth; mastery?: Mastery },
 ): Promise<GlossaryEntry | null> {
   const data = await readJson<{ entry: GlossaryEntry | null }>(
-    await api(`/api/glossary/${id}`, {
+    await api(`/api/glossary/${encodeURIComponent(id)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
@@ -248,7 +249,7 @@ export async function updateEntry(
 }
 
 export async function deleteEntry(id: string): Promise<void> {
-  await readJson<{ ok: boolean }>(await api(`/api/glossary/${id}`, { method: 'DELETE' }))
+  await readJson<{ ok: boolean }>(await api(`/api/glossary/${encodeURIComponent(id)}`, { method: 'DELETE' }))
 }
 
 export async function mergeEntries(target: string, sources: string[]): Promise<void> {
@@ -616,10 +617,21 @@ export async function deleteTopicNode(topicId: string, nodeId: string): Promise<
   )
 }
 
-export async function fetchEntryDetail(
-  id: string,
-): Promise<{ entry: GlossaryEntry; encounters: Encounter[] }> {
-  return readJson<{ entry: GlossaryEntry; encounters: Encounter[] }>(
-    await api(`/api/entries/${id}`),
+export async function fetchEntryDetail(id: string): Promise<EntryDetail> {
+  return readJson<EntryDetail>(await api(`/api/entries/${encodeURIComponent(id)}`))
+}
+
+export async function fetchDueReviews(): Promise<GlossaryEntry[]> {
+  const data = await readJson<{ entries: GlossaryEntry[] }>(await api('/api/review/due'))
+  return data.entries
+}
+
+export async function submitReview(id: string, remembered: boolean): Promise<GlossaryEntry> {
+  return readJson<GlossaryEntry>(
+    await api(`/api/review/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ remembered }),
+    }),
   )
 }

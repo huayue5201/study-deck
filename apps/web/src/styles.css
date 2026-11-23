@@ -1283,3 +1283,17 @@ button.link { color: var(--accent); }
 .encounter-level { flex: 0 0 auto; color: var(--accent); }
 .encounter-gist { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 button.badge.encounters { color: var(--accent); border-color: rgba(225, 180, 106, 0.35); }
+
+/* ---------- 复习 / 路径 / 关系 ---------- */
+.review-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; }
+.review-head button { font-size: 11px; padding: 3px 9px; }
+.entry-detail { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 2px; }
+.detail-label { font-size: 10px; color: var(--faint); letter-spacing: 0.08em; margin-right: 6px; }
+.entry-path { display: flex; align-items: center; flex-wrap: wrap; gap: 3px; font-size: 11px; color: var(--muted); }
+.entry-path .path-node { display: inline-flex; align-items: center; gap: 3px; }
+.entry-rel { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+.rel-chip {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--line); background: transparent; color: var(--accent); cursor: pointer;
+}
+.rel-chip:hover { border-color: var(--accent); }

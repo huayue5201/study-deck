@@ -146,7 +146,8 @@ const ENTRY_SELECT: &str = "SELECT e.id, e.term, e.summary, e.mastery, e.created
     (SELECT c.char_start FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_char_start,
     (SELECT c.char_end FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_char_end,
     (SELECT c.quote FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_quote,
-    (SELECT c.session_id FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_session_id
+    (SELECT c.session_id FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_session_id,
+    e.next_review_at, e.review_count, e.interval_days
     FROM entries e";
 
 pub struct Store {
@@ -399,6 +400,18 @@ fn migrate(conn: &Connection) -> Result<()> {
                  SELECT 'x_' || id, 'e_' || lower(trim(term)), gist, profile_id, level, message_id, char_start, char_end, quote, session_id, created_at
                  FROM glossary
                  WHERE trim(term) <> '';",
+            )?;
+            Ok(())
+        }),
+        (13, |c| {
+            // 间隔重复 + 卡片来源（用于路径/关系图）
+            ensure_column(c, "entries", "next_review_at", "TEXT")?;
+            ensure_column(c, "entries", "review_count", "INTEGER NOT NULL DEFAULT 0")?;
+            ensure_column(c, "entries", "interval_days", "INTEGER NOT NULL DEFAULT 0")?;
+            ensure_column(c, "encounters", "card_id", "TEXT")?;
+            c.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_entries_review ON entries(next_review_at);
+                 UPDATE entries SET next_review_at = created_at WHERE next_review_at IS NULL;",
             )?;
             Ok(())
         }),
@@ -884,6 +897,7 @@ impl Store {
         anchor: Option<&Anchor>,
         session_id: Option<&SessionId>,
         parent_card_id: Option<&str>,
+        card_id: Option<&str>,
     ) -> Result<()> {
         let key = Self::key_of(term);
         if key.is_empty() {
@@ -909,17 +923,17 @@ impl Store {
             None => {
                 let id = format!("e_{}", uuid::Uuid::new_v4().simple());
                 tx.execute(
-                    "INSERT INTO entries (id, term_key, term, summary, mastery, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, 'unknown', ?5, ?5)",
-                    params![id, key, term.trim(), gist, now],
+                    "INSERT INTO entries (id, term_key, term, summary, mastery, created_at, updated_at, next_review_at)
+                     VALUES (?1, ?2, ?3, ?4, 'unknown', ?5, ?5, ?6)",
+                    params![id, key, term.trim(), gist, now, review_at(1)],
                 )?;
                 id
             }
         };
 
         tx.execute(
-            "INSERT INTO encounters (id, entry_id, gist, profile_id, level, message_id, char_start, char_end, quote, session_id, parent_card_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO encounters (id, entry_id, gist, profile_id, level, message_id, char_start, char_end, quote, session_id, parent_card_id, card_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 uuid::Uuid::new_v4().simple().to_string(),
                 entry_id,
@@ -932,6 +946,7 @@ impl Store {
                 anchor.map(|a| a.quote.clone()),
                 session_id.map(|s| s.to_string()),
                 parent_card_id,
+                card_id,
                 now
             ],
         )?;
@@ -948,6 +963,7 @@ impl Store {
             entry.level.as_deref(),
             entry.source_anchor.as_ref(),
             entry.session_id.as_ref(),
+            None,
             None,
         )
     }
@@ -1072,6 +1088,101 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// 今天该复习的条目：到点且还没标成已掌握。
+    pub fn due_entries(&self, limit: usize) -> Result<Vec<GlossaryEntry>> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "{ENTRY_SELECT} WHERE e.mastery <> 'mastered' AND COALESCE(e.next_review_at, e.created_at) <= ?1
+             ORDER BY COALESCE(e.next_review_at, e.created_at) ASC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![now, limit as i64], map_entry)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// 复习一次：记得 → 间隔 ×2.2（封顶 60 天）；忘了 → 回到 1 天。
+    pub fn review_entry(&self, id: &str, remembered: bool) -> Result<Option<GlossaryEntry>> {
+        let conn = self.conn();
+        let current: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT COALESCE(interval_days, 0), COALESCE(review_count, 0) FROM entries WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((interval, count)) = current else {
+            return Ok(None);
+        };
+        let next_interval = if remembered {
+            ((interval.max(1) as f64 * 2.2).round() as i64).min(60)
+        } else {
+            1
+        };
+        conn.execute(
+            "UPDATE entries
+                SET interval_days = ?2,
+                    review_count = ?3,
+                    next_review_at = ?4,
+                    updated_at = ?5
+              WHERE id = ?1",
+            params![id, next_interval, count + 1, review_at(next_interval), Utc::now().to_rfc3339()],
+        )?;
+        // 注意：conn 还持着锁，这里必须复用同一个 guard，不能再 self.conn()
+        Ok(conn
+            .query_row(&format!("{ENTRY_SELECT} WHERE e.id = ?1"), params![id], map_entry)
+            .optional()?)
+    }
+
+    /// 这条概念最近一次展开的卡片链（根 → 叶），用于「路径」。
+    pub fn entry_path(&self, entry_id: &str) -> Result<Vec<Card>> {
+        let mut card_id: Option<String> = self
+            .conn()
+            .query_row(
+                "SELECT card_id FROM encounters WHERE entry_id = ?1 AND card_id IS NOT NULL
+                 ORDER BY created_at DESC LIMIT 1",
+                params![entry_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut chain = Vec::new();
+        let mut guard = 0;
+        while let Some(id) = card_id {
+            guard += 1;
+            if guard > 24 {
+                break;
+            }
+            let Some(card) = self.card_by_id(&id)? else { break };
+            card_id = card.parent_card_id.as_ref().map(|value| value.to_string());
+            chain.push(card);
+        }
+        chain.reverse();
+        Ok(chain)
+    }
+
+    /// 依赖关系：这条概念是从哪些概念展开来的 / 又催生了哪些概念。
+    pub fn entry_relations(&self, entry_id: &str) -> Result<(Vec<String>, Vec<String>)> {
+        let conn = self.conn();
+        let mut parents = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT x.entry_id FROM encounters c
+             JOIN encounters x ON x.card_id = c.parent_card_id
+             WHERE c.entry_id = ?1 AND x.entry_id <> ?1",
+        )?;
+        for row in stmt.query_map(params![entry_id], |row| row.get::<_, String>(0))? {
+            parents.push(row?);
+        }
+        let mut children = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT c.entry_id FROM encounters own
+             JOIN encounters c ON c.parent_card_id = own.card_id
+             WHERE own.entry_id = ?1 AND c.entry_id <> ?1",
+        )?;
+        for row in stmt.query_map(params![entry_id], |row| row.get::<_, String>(0))? {
+            children.push(row?);
+        }
+        Ok((parents, children))
     }
 
     /// 一条概念的全部「遇到」记录（时间线 / 路径）。
@@ -2365,7 +2476,18 @@ fn map_entry(row: &Row<'_>) -> rusqlite::Result<GlossaryEntry> {
             .ok()
             .flatten()
             .map(|value| parse_dt(&value)),
+        next_review_at: row
+            .get::<_, Option<String>>("next_review_at")
+            .ok()
+            .flatten()
+            .map(|value| parse_dt(&value)),
+        review_count: row.get::<_, Option<i64>>("review_count").ok().flatten().unwrap_or(0) as u32,
+        interval_days: row.get::<_, Option<i64>>("interval_days").ok().flatten().unwrap_or(0) as u32,
     })
+}
+
+fn review_at(days: i64) -> String {
+    (Utc::now() + chrono::Duration::days(days)).to_rfc3339()
 }
 
 fn parse_dt(value: &str) -> DateTime<Utc> {

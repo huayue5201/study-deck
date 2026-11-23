@@ -846,6 +846,7 @@ export default function App() {
         profile_id: activeProfile.id,
         level: card.level,
         parent_card_id: card.parentCardId ?? undefined,
+        card_id: card.id ?? undefined,
       })
       setCard((current) => (current ? { ...current, saved: true } : current))
       if (glossaryOpen) void refreshGlossary(query)

@@ -75,6 +75,13 @@ pub struct GlossaryEntry {
     pub encounter_count: u32,
     #[serde(default)]
     pub last_seen: Option<DateTime<Utc>>,
+    /// 下次复习时间（间隔重复）；None = 没排期
+    #[serde(default)]
+    pub next_review_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub review_count: u32,
+    #[serde(default)]
+    pub interval_days: u32,
 }
 
 /// 一次「遇到」：在哪个上下文、用哪套模板哪一档、得到什么结论。
@@ -112,6 +119,9 @@ impl GlossaryEntry {
             updated_at: None,
             encounter_count: 0,
             last_seen: None,
+            next_review_at: None,
+            review_count: 0,
+            interval_days: 0,
         }
     }
 }

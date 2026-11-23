@@ -270,6 +270,8 @@ pub async fn run_with_ready(
         .route("/api/glossary", get(list_glossary).post(add_glossary))
         .route("/api/glossary/match", get(match_glossary))
         .route("/api/entries/{id}", get(entry_detail))
+        .route("/api/review/due", get(due_reviews))
+        .route("/api/review/{id}", post(review_entry))
         .route("/api/glossary/merge", post(merge_glossary))
         .route(
             "/api/glossary/{id}",
@@ -2264,6 +2266,8 @@ struct GlossaryBody {
     level: Option<String>,
     /// 若是在某张卡上展开的，记下父卡
     parent_card_id: Option<String>,
+    /// 这条结论来自哪张卡（用于路径/关系图）
+    card_id: Option<String>,
 }
 
 async fn add_glossary(
@@ -2271,16 +2275,28 @@ async fn add_glossary(
     Json(body): Json<GlossaryBody>,
 ) -> impl IntoResponse {
     let session_id = body.session_id.map(SessionId::from);
+    // 账本条目是「概念」，不是一整段话：取第一行并裁到 40 字
+    let raw = body.term.trim();
+    let first_line = raw.lines().next().unwrap_or("").trim();
+    let term: String = if first_line.chars().count() > 40 {
+        first_line.chars().take(40).collect()
+    } else {
+        first_line.to_string()
+    };
+    if term.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "term 不能为空");
+    }
     match state.store.record_encounter(
-        &body.term,
+        &term,
         &body.gist,
         body.profile_id.as_deref(),
         body.level.as_deref(),
         body.anchor.as_ref(),
         session_id.as_ref(),
         body.parent_card_id.as_deref(),
+        body.card_id.as_deref(),
     ) {
-        Ok(()) => match state.store.match_entry(&body.term).ok().flatten() {
+        Ok(()) => match state.store.match_entry(&term).ok().flatten() {
             Some(entry) => (StatusCode::CREATED, Json(json!(entry))).into_response(),
             None => (StatusCode::CREATED, Json(json!({ "ok": true }))).into_response(),
         },
@@ -2587,8 +2603,64 @@ async fn entry_detail(
     let Some(entry) = entry else {
         return api_error(StatusCode::NOT_FOUND, "entry not found");
     };
-    match state.store.entry_encounters(&id) {
-        Ok(encounters) => Json(json!({ "entry": entry, "encounters": encounters })).into_response(),
+    let encounters = match state.store.entry_encounters(&id) {
+        Ok(encounters) => encounters,
+        Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    let path = state
+        .store
+        .entry_path(&id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|card| json!({
+            "id": card.id,
+            "quote": card.anchor.quote,
+            "question": card.question,
+            "depth": card.stack_depth,
+        }))
+        .collect::<Vec<_>>();
+    let (parents, children) = state.store.entry_relations(&id).unwrap_or_default();
+    let all = state.store.all_entries().unwrap_or_default();
+    let brief = |ids: Vec<String>| -> Vec<serde_json::Value> {
+        ids.into_iter()
+            .filter_map(|entry_id| {
+                all.iter()
+                    .find(|item| item.id.as_str() == entry_id)
+                    .map(|item| json!({ "id": item.id, "term": item.term }))
+            })
+            .collect()
+    };
+
+    Json(json!({
+        "entry": entry,
+        "encounters": encounters,
+        "path": path,
+        "parents": brief(parents),
+        "children": brief(children),
+    }))
+    .into_response()
+}
+
+async fn due_reviews(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.store.due_entries(50) {
+        Ok(entries) => Json(json!({ "entries": entries })).into_response(),
+        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewBody {
+    remembered: bool,
+}
+
+async fn review_entry(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<ReviewBody>,
+) -> impl IntoResponse {
+    match state.store.review_entry(&id, body.remembered) {
+        Ok(Some(entry)) => Json(json!(entry)).into_response(),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "entry not found"),
         Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }

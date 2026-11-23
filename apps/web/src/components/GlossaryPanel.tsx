@@ -2,14 +2,16 @@ import { useMemo, useState } from 'react'
 import { useI18n } from '../lib/i18n'
 import {
   deleteEntry,
+  fetchDueReviews,
   fetchEntryDetail,
   mergeEntries,
+  submitReview,
   updateEntry,
 } from '../lib/api'
 import {
   DEPTH_LABEL,
   MASTERY_LABEL,
-  type Encounter,
+  type EntryDetail,
   type GlossaryEntry,
   type Mastery,
   type MessageHit,
@@ -37,12 +39,14 @@ const norm = (term: string) => term.trim().toLowerCase()
 
 export function GlossaryPanel(props: Props) {
   const { t } = useI18n()
-  const [tab, setTab] = useState<'ledger' | 'search'>('ledger')
+  const [tab, setTab] = useState<'ledger' | 'review' | 'search'>('ledger')
+  const [due, setDue] = useState<GlossaryEntry[]>([])
+  const [reviewBusy, setReviewBusy] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [confirming, setConfirming] = useState<string | null>(null)
   const [openTimeline, setOpenTimeline] = useState<string | null>(null)
-  const [timelines, setTimelines] = useState<Record<string, Encounter[]>>({})
+  const [details, setDetails] = useState<Record<string, EntryDetail>>({})
 
   const toggleTimeline = async (entry: GlossaryEntry) => {
     if (openTimeline === entry.id) {
@@ -50,13 +54,33 @@ export function GlossaryPanel(props: Props) {
       return
     }
     setOpenTimeline(entry.id)
-    if (!timelines[entry.id]) {
+    if (!details[entry.id]) {
       try {
         const detail = await fetchEntryDetail(entry.id)
-        setTimelines((prev) => ({ ...prev, [entry.id]: detail.encounters }))
+        setDetails((prev) => ({ ...prev, [entry.id]: detail }))
       } catch {
-        // 拉不到时间线不影响列表
+        // 拉不到详情不影响列表
       }
+    }
+  }
+
+  const loadDue = async () => {
+    try {
+      setDue(await fetchDueReviews())
+    } catch {
+      setDue([])
+    }
+  }
+
+  const answerReview = async (entry: GlossaryEntry, remembered: boolean) => {
+    if (reviewBusy) return
+    setReviewBusy(true)
+    try {
+      await submitReview(entry.id, remembered)
+      setDue((prev) => prev.filter((item) => item.id !== entry.id))
+      props.onChanged()
+    } finally {
+      setReviewBusy(false)
     }
   }
 
@@ -108,6 +132,15 @@ export function GlossaryPanel(props: Props) {
           <button className={tab === 'ledger' ? 'active' : ''} onClick={() => setTab('ledger')}>
             {t('账本')} {props.entries.length > 0 ? props.entries.length : ''}
           </button>
+          <button
+            className={tab === 'review' ? 'active' : ''}
+            onClick={() => {
+              setTab('review')
+              void loadDue()
+            }}
+          >
+            {t('复习')}
+          </button>
           <button className={tab === 'search' ? 'active' : ''} onClick={() => setTab('search')}>
             {t('搜索')}
           </button>
@@ -117,7 +150,35 @@ export function GlossaryPanel(props: Props) {
         </button>
       </header>
 
-      {tab === 'ledger' ? (
+      {tab === 'review' ? (
+        <>
+          <div className="review-head">
+            <span className="muted small">{t('按间隔重复排期；记得就拉长，忘了回到 1 天')}</span>
+            <button onClick={() => void loadDue()}>{t('刷新')}</button>
+          </div>
+          <div className="entries">
+            {due.length === 0 && <p className="muted">{t('今天没有到期的条目。')}</p>}
+            {due.map((entry) => (
+              <div key={entry.id} className="entry">
+                <div className="entry-head">
+                  <span className="term">{entry.term}</span>
+                  <span className={`badge depth-${entry.depth}`}>{DEPTH_LABEL[entry.depth]}</span>
+                  <span className="badge">{t('第 {n} 次', { n: (entry.review_count ?? 0) + 1 })}</span>
+                </div>
+                <p className="gist">{entry.gist}</p>
+                <div className="entry-actions">
+                  <button className="primary" disabled={reviewBusy} onClick={() => void answerReview(entry, true)}>
+                    {t('记得')}
+                  </button>
+                  <button disabled={reviewBusy} onClick={() => void answerReview(entry, false)}>
+                    {t('忘了')}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : tab === 'ledger' ? (
         <>
           <input
             className="search"
@@ -171,19 +232,73 @@ export function GlossaryPanel(props: Props) {
                   )}
 
                   {openTimeline === entry.id && (
-                    <div className="encounter-timeline">
-                      {(timelines[entry.id] ?? []).map((hit) => (
-                        <div key={hit.id} className="encounter">
-                          <span className="encounter-time">
-                            {hit.created_at.slice(5, 16).replace('T', ' ')}
-                          </span>
-                          <span className="encounter-level">{hit.level ?? ''}</span>
-                          <span className="encounter-gist">{hit.gist.slice(0, 80)}</span>
+                    <div className="entry-detail">
+                      {(details[entry.id]?.path.length ?? 0) > 0 && (
+                        <div className="entry-path">
+                          <span className="detail-label">{t('路径')}</span>
+                          {details[entry.id]?.path.map((node, index) => (
+                            <span key={node.id} className="path-node">
+                              {index > 0 && <span className="crumb-sep">›</span>}
+                              <span title={node.question}>{node.quote.slice(0, 14)}</span>
+                            </span>
+                          ))}
                         </div>
-                      ))}
-                      {(timelines[entry.id] ?? []).length === 0 && (
-                        <p className="muted small">没有更早的记录。</p>
                       )}
+
+                      {(details[entry.id]?.parents.length ?? 0) > 0 && (
+                        <div className="entry-rel">
+                          <span className="detail-label">{t('来自')}</span>
+                          {details[entry.id]?.parents.map((rel) => (
+                            <button
+                              key={rel.id}
+                              className="rel-chip"
+                              onClick={() => {
+                                setOpenTimeline(rel.id)
+                                void fetchEntryDetail(rel.id).then((detail) =>
+                                  setDetails((prev) => ({ ...prev, [rel.id]: detail })),
+                                )
+                              }}
+                            >
+                              {rel.term}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {(details[entry.id]?.children.length ?? 0) > 0 && (
+                        <div className="entry-rel">
+                          <span className="detail-label">{t('衍生')}</span>
+                          {details[entry.id]?.children.map((rel) => (
+                            <button
+                              key={rel.id}
+                              className="rel-chip"
+                              onClick={() => {
+                                setOpenTimeline(rel.id)
+                                void fetchEntryDetail(rel.id).then((detail) =>
+                                  setDetails((prev) => ({ ...prev, [rel.id]: detail })),
+                                )
+                              }}
+                            >
+                              {rel.term}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="encounter-timeline">
+                        {(details[entry.id]?.encounters ?? []).map((hit) => (
+                          <div key={hit.id} className="encounter">
+                            <span className="encounter-time">
+                              {hit.created_at.slice(5, 16).replace('T', ' ')}
+                            </span>
+                            <span className="encounter-level">{hit.level ?? ''}</span>
+                            <span className="encounter-gist">{hit.gist.slice(0, 80)}</span>
+                          </div>
+                        ))}
+                        {(details[entry.id]?.encounters.length ?? 0) === 0 && (
+                          <p className="muted small">{t('没有更早的记录。')}</p>
+                        )}
+                      </div>
                     </div>
                   )}
 

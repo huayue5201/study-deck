@@ -162,6 +162,9 @@ export interface GlossaryEntry {
   updated_at?: string | null
   encounter_count?: number
   last_seen?: string | null
+  next_review_at?: string | null
+  review_count?: number
+  interval_days?: number
 }
 
 export interface Encounter {
@@ -349,4 +352,24 @@ export interface Reminder {
   course_title: string
   item: CourseItem
   topic: Topic | null
+}
+
+export interface EntryPathNode {
+  id: string
+  quote: string
+  question: string
+  depth: number
+}
+
+export interface EntryBrief {
+  id: string
+  term: string
+}
+
+export interface EntryDetail {
+  entry: GlossaryEntry
+  encounters: Encounter[]
+  path: EntryPathNode[]
+  parents: EntryBrief[]
+  children: EntryBrief[]
 }
