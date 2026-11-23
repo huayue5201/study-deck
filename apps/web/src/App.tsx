@@ -970,14 +970,14 @@ export default function App() {
               className="topbar-usage"
               title={t('本会话累计 token')}
             >
-              {formatTokens(usage.total_tokens)} tok
+              {formatTokens(usage.total_tokens)} tokens
             </span>
           )}
           <span className="topbar-model" title={t('当前对话模型')}>
             <span className="status-dot" />
             {settings?.model || t('未配置模型')}
           </span>
-          <button className="ghost" onClick={() => setShowProfiles(true)}>{t('模板')}</button>
+          <button className="ghost" onClick={() => setShowProfiles(true)}>{t('卡片模板')}</button>
           <button className="ghost" onClick={() => setShowSettings(true)}>{t('设置')}</button>
           {!topicPageId && !coursePageId && (
             <button onClick={() => setGlossaryOpen((value) => !value)}>
