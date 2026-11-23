@@ -196,6 +196,8 @@ export interface ChatBody {
   level?: string
   card_id?: string
   card_history?: string
+  /** 回答语言：跟随界面 */
+  locale?: string
 }
 
 export interface Health {

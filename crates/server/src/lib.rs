@@ -1592,6 +1592,8 @@ struct TurnSpec {
     card_id: Option<String>,
     card_history: Option<String>,
     project_root: Option<PathBuf>,
+    /// 回答语言：Some("en") 跟随英文界面
+    locale: Option<String>,
     /// 卡片模板 id；None = 用当前默认模板
     profile_id: Option<String>,
     /// 用户选的档位 id
@@ -1784,6 +1786,7 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
         project_root,
         profile: resolved_profile,
         level: Some(resolved_level.unwrap_or_default()).filter(|value| !value.is_empty()),
+        locale: spec.locale,
         history,
     };
 
@@ -1994,6 +1997,8 @@ struct ChatBody {
     profile_id: Option<String>,
     /// 档位 id（不传 = 模板默认档）
     level: Option<String>,
+    /// 回答语言（zh/en）
+    locale: Option<String>,
 }
 
 fn default_mode() -> String {
@@ -2024,6 +2029,7 @@ async fn chat(State(state): State<Arc<AppState>>, Json(body): Json<ChatBody>) ->
         project_root: None,
         profile_id: body.profile_id,
         level: body.level,
+        locale: body.locale,
     };
     match begin_turn(&state, spec) {
         Ok(started) => respond_with_turn(started),
@@ -2116,6 +2122,7 @@ async fn ask(State(state): State<Arc<AppState>>, Json(body): Json<AskBody>) -> R
         },
         profile_id: None,
         level: None,
+        locale: None,
     };
     match begin_turn(&state, spec) {
         Ok(started) => respond_with_turn(started),

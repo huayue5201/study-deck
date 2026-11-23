@@ -55,12 +55,19 @@ impl CardProfile {
         self.levels.iter().find(|level| level.id == id)
     }
 
-    /// 请求里带的档位优先；无效或缺失时退回模板默认档，再退回第一档。
+    /// 请求里带的档位优先；无效或缺失时退回模板默认档，
+    /// 再退回**中间档**——三个真实模板的常用档都是中间那个，不是最浅的那个。
     pub fn resolved_level(&self, requested: Option<&str>) -> Option<&CardLevel> {
-        requested
-            .and_then(|id| self.level(id))
-            .or_else(|| self.level(&self.default_level))
-            .or_else(|| self.levels.first())
+        if let Some(level) = requested.and_then(|id| self.level(id)) {
+            return Some(level);
+        }
+        if let Some(level) = self.level(&self.default_level) {
+            return Some(level);
+        }
+        if self.levels.is_empty() {
+            return None;
+        }
+        Some(&self.levels[self.levels.len() / 2])
     }
 
     pub fn is_valid(&self) -> bool {
@@ -96,10 +103,11 @@ impl CardProfile {
             axis_label: "理解深度".into(),
             default_level: "can_tune".into(),
             max_chars: 260,
+            // 「需要的理解深度」不列在这里：档位本身已经声明了深度，
+            // 再让模型写一段就是同一件事说两遍。
             sections: vec![
                 "一句话定义".into(),
                 "在当前位置的角色".into(),
-                "需要的理解深度".into(),
                 "前置依赖（一层）".into(),
                 "下一步".into(),
             ],

@@ -95,7 +95,6 @@ function nextLevelId(
 function validateDraft(draft: Draft): string[] {
   const problems: string[] = []
   if (!draft.label.trim()) problems.push('模板名不能为空')
-  if (!draft.axis_label.trim()) problems.push('轴名称不能为空')
   if (draft.levels.length < MIN_LEVELS || draft.levels.length > MAX_LEVELS) {
     problems.push(`档位需要 ${MIN_LEVELS}–${MAX_LEVELS} 个`)
   }
@@ -113,8 +112,8 @@ function validateDraft(draft: Draft): string[] {
     problems.push('默认档位不在档位列表里')
   }
   const maxChars = Number(draft.max_chars)
-  if (!Number.isInteger(maxChars) || maxChars <= 0) {
-    problems.push('字数上限需要是正整数')
+  if (draft.max_chars.trim() !== '' && (!Number.isInteger(maxChars) || maxChars <= 0)) {
+    problems.push('字数上限需要是正整数（留空用默认 260）')
   }
   if (draft.sections.length === 0) problems.push('至少保留一个输出小节')
   if (draft.sections.some((section) => !section.trim())) {
@@ -128,7 +127,7 @@ function toPayload(draft: Draft): Omit<CardProfile, 'id'> {
     label: draft.label.trim(),
     axis_label: draft.axis_label.trim(),
     default_level: draft.default_level,
-    max_chars: Number(draft.max_chars),
+    max_chars: draft.max_chars.trim() === '' ? 0 : Number(draft.max_chars),
     sections: draft.sections.map((section) => section.trim()),
     levels: draft.levels.map((level) => ({
       id: level.id,
@@ -477,7 +476,7 @@ export function ProfilesModal({ profiles, activeId, onReload, onClose }: Props) 
                     <input
                       value={draft.axis_label}
                       onChange={(event) => updateDraft({ axis_label: event.target.value })}
-                      placeholder={t('比如：理解深度')}
+                      placeholder={t('比如：理解深度（可留空）')}
                     />
                   </label>
                   <label className="profile-field">
@@ -486,6 +485,7 @@ export function ProfilesModal({ profiles, activeId, onReload, onClose }: Props) 
                       type="number"
                       min={40}
                       value={draft.max_chars}
+                      placeholder={t('留空用默认 260')}
                       onChange={(event) => updateDraft({ max_chars: event.target.value })}
                     />
                   </label>

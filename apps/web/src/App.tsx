@@ -139,7 +139,7 @@ function resolveLevel(profile: CardProfile, preferred?: string | null): string {
 }
 
 export default function App() {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [usage, setUsage] = useState<SessionUsage | null>(null)
@@ -605,7 +605,7 @@ export default function App() {
     setStreamingId(draft.id)
 
     try {
-      await streamChat({ session_id: sid, mode: 'main', text }, (frame) => {
+      await streamChat({ session_id: sid, mode: 'main', text, locale: lang }, (frame) => {
         if (frame.type === 'assistant_start') {
           const liveId = assistantIdRef.current
           assistantIdRef.current = frame.message_id
@@ -688,6 +688,7 @@ export default function App() {
             anchor,
             profile_id: activeProfile.id,
             level,
+            locale: lang,
             card_id: existingCardId ?? undefined,
             card_history: cardHistory,
           },

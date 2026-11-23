@@ -320,6 +320,8 @@ const EN: Record<string, string> = {
   '后端就绪后，这里会列出内置模板。': 'Built-in templates show up here once the backend is ready.',
   '模板决定卡片的轴与小节': 'Templates decide the card axis and sections',
   '比如：理解深度': 'e.g. Depth of understanding',
+  '比如：理解深度（可留空）': 'e.g. Depth of understanding (optional)',
+  '留空用默认 260': 'Leave blank for 260',
   '比如：一句话定义': 'e.g. One-line definition',
   '比如：能调': 'e.g. Can use',
   '比如：法律': 'e.g. Law',

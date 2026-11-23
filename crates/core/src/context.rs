@@ -27,6 +27,8 @@ pub struct TurnRequest {
     pub profile: Option<CardProfile>,
     /// 用户选的档位 id（profile 内有效）。
     pub level: Option<String>,
+    /// 回答语言：Some("en") / Some("zh")；None = 跟随默认（中文）。
+    pub locale: Option<String>,
     /// 已经存在的卡片，用于卡片内的追问
     pub parent_card: Option<Card>,
     /// 卡片内此前的追问/回答，用于多轮卡片对话。

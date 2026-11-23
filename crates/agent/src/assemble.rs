@@ -76,6 +76,14 @@ fn compact_history(messages: &[Message], max_chars: usize) -> String {
     out
 }
 
+/// 回答语言：界面是英文就讲英文，别让卡片和 UI 说两种话。
+fn language_line(locale: Option<&str>) -> &'static str {
+    match locale {
+        Some("en") => "\n用英文回答（专有名词可保留原文）。\n",
+        _ => "\n用中文回答。\n",
+    }
+}
+
 pub struct MainAssembler;
 
 /// 卡片装配器：范式（轴/档位/小节/系统提示词）来自模板，机制不变。
@@ -222,10 +230,15 @@ impl ContextAssembler for CardAssembler {
         }
 
         if let Some(level) = level {
+            let parenthetical = if profile.axis_label.trim().is_empty() {
+                String::new()
+            } else {
+                format!("（{}）", profile.axis_label)
+            };
             system.push_str(&format!(
-                "\n本次档位：{}（{}）\n讲解停在这里：{}\n",
+                "\n本次档位：{}{}\n讲解停在这里：{}\n",
                 level.label,
-                profile.axis_label,
+                parenthetical,
                 if level.stop.trim().is_empty() { "按该档位的常识边界收住" } else { &level.stop }
             ));
         } else {
@@ -261,9 +274,11 @@ impl ContextAssembler for CardAssembler {
         user.push_str(&anchor.quote);
         user.push_str("\n\n【它出现的位置（前后文）】\n");
         user.push_str(&window);
-        user.push_str("\n\n【读者要的理解深度】");
-        user.push_str(depth.label_cn());
-        user.push('\n');
+        if level.is_none() {
+            user.push_str("\n\n【读者要的理解深度】");
+            user.push_str(depth.label_cn());
+            user.push('\n');
+        }
 
         if let Some(history) = &request.card_history {
             let trimmed: String = history.chars().take(3_000).collect();
@@ -280,6 +295,7 @@ impl ContextAssembler for CardAssembler {
         user.push_str("\n【用户的问题】\n");
         user.push_str(&request.text);
 
+        system.push_str(language_line(request.locale.as_deref()));
         vec![Block::system(system), Block::user(user)]
     }
 }
@@ -328,6 +344,7 @@ mod tests {
             project_root: None,
             profile: None,
             level: None,
+            locale: None,
             history: Vec::new(),
         }
     }
@@ -370,6 +387,7 @@ mod tests {
             project_root: None,
             profile: None,
             level: None,
+            locale: None,
             history: Vec::new(),
         };
         let blocks = CardAssembler::new(None).assemble(&request);
@@ -397,6 +415,7 @@ mod tests {
             project_root: None,
             profile: None,
             level: None,
+            locale: None,
             history: Vec::new(),
         };
         let blocks = CardAssembler::new(None).assemble(&request);
@@ -456,6 +475,7 @@ mod tests {
             project_root: None,
             profile: None,
             level: None,
+            locale: None,
             history: Vec::new(),
         };
         let blocks = MainAssembler.assemble(&request);
@@ -487,6 +507,7 @@ mod profile_tests {
             depth: Some(Depth::CanTune),
             profile,
             level: level.map(|value| value.to_string()),
+            locale: None,
             parent_card: None,
             card_history: None,
             topic: None,
@@ -517,6 +538,26 @@ mod profile_tests {
         let system = &blocks.first().expect("system block").text;
         // 默认档是 use
         assert!(system.contains("会用"), "回落到 default_level: {system}");
+    }
+
+    #[test]
+    fn english_locale_asks_for_an_english_answer() {
+        let profile = CardProfile::builtin_language_en();
+        let mut request = card_request(Some(profile), Some("use"));
+        request.locale = Some("en".into());
+        let blocks = CardAssembler::new(request.profile.clone()).assemble(&request);
+        let system = &blocks.first().expect("system block").text;
+        assert!(system.contains("用英文回答"), "英文界面应要求英文回答: {system}");
+    }
+
+    #[test]
+    fn blank_axis_label_does_not_leave_empty_brackets() {
+        let mut profile = CardProfile::builtin_language_en();
+        profile.axis_label = String::new();
+        let request = card_request(Some(profile), Some("use"));
+        let blocks = CardAssembler::new(request.profile.clone()).assemble(&request);
+        let system = &blocks.first().expect("system block").text;
+        assert!(!system.contains("（）"), "空轴名不应留下空括号: {system}");
     }
 
     #[test]

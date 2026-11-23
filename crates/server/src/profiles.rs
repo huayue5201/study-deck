@@ -20,6 +20,7 @@ impl Profiles {
     pub fn new(dir: &Path, settings: SettingsStore) -> Self {
         let profiles = Self { dir: dir.to_path_buf(), settings };
         profiles.seed();
+        profiles.migrate_legacy_tech();
         profiles
     }
 
@@ -31,6 +32,34 @@ impl Profiles {
             if !path.exists() {
                 let _ = write_profile(&path, &profile);
             }
+        }
+    }
+
+    /// 早期 tech 模板的小节里有一条「需要的理解深度」，与档位重复。
+    /// 只在模板还是出厂状态时清理，用户改过就尊重用户。
+    fn migrate_legacy_tech(&self) {
+        const LEGACY: [&str; 5] = [
+            "一句话定义",
+            "在当前位置的角色",
+            "需要的理解深度",
+            "前置依赖（一层）",
+            "下一步",
+        ];
+        let Some(mut profile) = self.get("tech") else {
+            return;
+        };
+        let is_factory = profile.levels.len() == 3
+            && profile.levels[0].id == "can_use"
+            && profile.sections.len() == LEGACY.len()
+            && profile
+                .sections
+                .iter()
+                .zip(LEGACY.iter())
+                .all(|(got, want)| got == want);
+        if is_factory {
+            profile.sections = CardProfile::builtin_tech().sections;
+            let _ = self.save(&profile);
+            tracing::info!("已清理 tech 模板里与档位重复的小节");
         }
     }
 
