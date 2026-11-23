@@ -2256,6 +2256,8 @@ mod tests {
             question: "请解释这段内容。".into(),
             answer: "**一句话定义**：采样率是每秒样本数。".into(),
             promoted_session_id: None,
+            profile_id: None,
+            level: None,
             created_at: Utc::now(),
         };
         store.add_card(&card).expect("card");
