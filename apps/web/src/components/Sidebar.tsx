@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useI18n } from '../lib/i18n'
 import type { CourseSummary, SessionSummary, Topic } from '../lib/types'
 
@@ -59,6 +59,32 @@ export function Sidebar({
   const { t, lang } = useI18n()
   const [query, setQuery] = useState('')
   const [confirmId, setConfirmId] = useState<string | null>(null)
+  // 一个计时器只能管一次确认：不 clear 旧定时器的话，先点 A 再点 B，
+  // A 的 3 秒到期会把 B 的确认清掉——多点几次就是"状态错乱"。
+  const confirmTimer = useRef<number | null>(null)
+
+  const armDelete = (id: string) => {
+    if (confirmTimer.current !== null) {
+      window.clearTimeout(confirmTimer.current)
+    }
+    setConfirmId(id)
+    confirmTimer.current = window.setTimeout(() => {
+      setConfirmId(null)
+      confirmTimer.current = null
+    }, 3000)
+  }
+
+  const disarmDelete = () => {
+    if (confirmTimer.current !== null) {
+      window.clearTimeout(confirmTimer.current)
+      confirmTimer.current = null
+    }
+    setConfirmId(null)
+  }
+
+  useEffect(() => () => {
+    if (confirmTimer.current !== null) window.clearTimeout(confirmTimer.current)
+  }, [])
 
   const filtered = useMemo(() => {
     const term = query.trim().toLowerCase()
@@ -108,11 +134,10 @@ export function Sidebar({
             onClick={(event) => {
               event.stopPropagation()
               if (confirmId !== session.id) {
-                setConfirmId(session.id)
-                window.setTimeout(() => setConfirmId(null), 3000)
+                armDelete(session.id)
                 return
               }
-              setConfirmId(null)
+              disarmDelete()
               onDelete(session.id)
             }}
           >

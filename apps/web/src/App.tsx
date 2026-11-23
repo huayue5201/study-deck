@@ -478,15 +478,23 @@ export default function App() {
     }
   }, [refreshSessions])
 
+  const deletingRef = useRef<Set<string>>(new Set())
+
   const handleDeleteSession = useCallback(async (id: string) => {
+    if (deletingRef.current.has(id)) return
+    deletingRef.current.add(id)
+    // 删除前先记住"它是不是当前会话"：await 之后 sessionRef 可能已经变了
+    const wasCurrent = id === sessionRef.current
     try {
       await deleteSession(id)
       const recent = await listSessions()
       setSessions(recent)
-      if (id !== sessionRef.current) return
+      if (!wasCurrent) return
       const next = recent.find((item) => item.messages > 0) ?? recent[0]
       const fresh = next ? next.id : await createSession()
       const view = await fetchSession(fresh)
+      // 立刻同步 ref：连续删两次时，第二次不能还拿着旧 id
+      sessionRef.current = view.id
       localStorage.setItem('studydeck.session', view.id)
       setSessionId(view.id)
       setMessages(view.messages)
@@ -498,6 +506,8 @@ export default function App() {
       await refreshSessions()
     } catch (err) {
       setError(String(err))
+    } finally {
+      deletingRef.current.delete(id)
     }
   }, [refreshSessions])
 
