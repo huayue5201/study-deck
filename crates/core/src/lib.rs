@@ -9,6 +9,7 @@ pub mod event;
 pub mod glossary;
 pub mod ids;
 pub mod policy;
+pub mod profiles;
 pub mod session;
 pub mod topic;
 
@@ -23,6 +24,7 @@ pub use ids::{
     TopicNodeId,
 };
 pub use policy::NestingPolicy;
+pub use profiles::{CardLevel, CardProfile};
 pub use session::{Message, MessageStatus, Role, Session};
 pub use topic::{SessionSeed, Topic, TopicEdge, TopicEdgeKind, TopicNode, TopicNodeStatus};
 

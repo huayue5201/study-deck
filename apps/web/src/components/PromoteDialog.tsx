@@ -6,6 +6,7 @@ import type { OpenCardState } from './Card'
 
 interface Props {
   card: OpenCardState
+  initialDepth: Depth
   parentTitle: string
   topics: Topic[]
   busy: boolean
@@ -16,10 +17,18 @@ interface Props {
 const DEPTHS: Depth[] = ['can_use', 'can_tune', 'can_derive']
 
 /** 升级确认层：只问“专题叫什么、要学多深”，不复制父会话。 */
-export function PromoteDialog({ card, parentTitle, topics, busy, onCancel, onSubmit }: Props) {
+export function PromoteDialog({
+  card,
+  initialDepth,
+  parentTitle,
+  topics,
+  busy,
+  onCancel,
+  onSubmit,
+}: Props) {
   const { t } = useI18n()
   const [title, setTitle] = useState(card.anchor.quote.trim().slice(0, 80))
-  const [depth, setDepth] = useState<Depth>(card.depth)
+  const [depth, setDepth] = useState<Depth>(initialDepth)
   const [topicId, setTopicId] = useState('')
 
   return (

@@ -56,6 +56,11 @@ pub struct GlossaryEntry {
     pub term: String,
     pub gist: String,
     pub depth: Depth,
+    /// 记下这一条是在哪套模板、哪一档下得到的：跨模板不互通。
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub level: Option<String>,
     #[serde(default)]
     pub mastery: Mastery,
     pub source_anchor: Option<Anchor>,
@@ -79,6 +84,8 @@ impl GlossaryEntry {
             term: term.into(),
             gist: gist.into(),
             depth,
+            profile_id: None,
+            level: None,
             mastery: Mastery::Unknown,
             source_anchor: anchor,
             session_id: None,

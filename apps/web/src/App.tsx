@@ -11,6 +11,7 @@ import { CardLayer } from './components/CardLayer'
 import { GlossaryPanel } from './components/GlossaryPanel'
 import { SetupGate } from './components/SetupGate'
 import { SettingsPanel } from './components/SettingsPanel'
+import { ProfilesModal } from './components/ProfilesModal'
 import type { OpenCardState } from './components/Card'
 import {
   createSession,
@@ -19,6 +20,7 @@ import {
   fetchSession,
   fetchSettings,
   listGlossary,
+  listProfiles,
   deleteSession,
   listSessions,
   matchEntry,
@@ -38,13 +40,15 @@ import { useI18n } from './lib/i18n'
 import { isImeComposing } from './lib/ime'
 import { readAnchor } from './lib/selection'
 import {
-  DEPTH_LABEL,
+  FALLBACK_PROFILE,
   MASTERY_LABEL,
   type Anchor,
+  type CardProfile,
   type Depth,
   type GlossaryEntry,
   type Message,
   type MessageHit,
+  type ProfilesResponse,
   type ProviderPreset,
   type SessionSummary,
   type SessionUsage,
@@ -116,6 +120,24 @@ function stripMarkdown(text: string): string {
     .trim()
 }
 
+/** 卡片档位是用户自定义的；账本仍按三档 Depth 记账，这里做一次映射。 */
+function depthForLevel(profile: CardProfile, level: string): Depth {
+  if (level === 'can_use' || level === 'can_tune' || level === 'can_derive') return level
+  const index = profile.levels.findIndex((item) => item.id === level)
+  if (index < 0) return 'can_tune'
+  if (index === 0) return 'can_use'
+  if (index >= profile.levels.length - 1) return 'can_derive'
+  return 'can_tune'
+}
+
+function resolveLevel(profile: CardProfile, preferred?: string | null): string {
+  if (preferred && profile.levels.some((level) => level.id === preferred)) return preferred
+  if (profile.levels.some((level) => level.id === profile.default_level)) {
+    return profile.default_level
+  }
+  return profile.levels[0]?.id ?? 'can_tune'
+}
+
 export default function App() {
   const { t } = useI18n()
   const [sessionId, setSessionId] = useState<string | null>(null)
@@ -152,6 +174,9 @@ export default function App() {
   const [presets, setPresets] = useState<ProviderPreset[]>([])
   const [settings, setSettings] = useState<SettingsView | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+  const [showProfiles, setShowProfiles] = useState(false)
+  const [profiles, setProfiles] = useState<CardProfile[]>([])
+  const [activeProfile, setActiveProfile] = useState<CardProfile>(FALLBACK_PROFILE)
   const [gateSkipped, setGateSkipped] = useState(false)
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [searchQuery, setSearchQuery] = useState('')
@@ -310,6 +335,26 @@ export default function App() {
       // 提醒拿不到不影响主流程
     }
   }, [])
+
+  const refreshProfiles = useCallback(async (): Promise<ProfilesResponse | null> => {
+    try {
+      const data = await listProfiles()
+      setProfiles(data.profiles)
+      setActiveProfile(
+        data.profiles.find((profile) => profile.id === data.active) ??
+          data.profiles[0] ??
+          FALLBACK_PROFILE,
+      )
+      return data
+    } catch {
+      // 模板接口可能还没就绪；卡片先用兜底模板继续工作
+      return null
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshProfiles()
+  }, [refreshProfiles])
 
   useEffect(() => {
     if (sessionId) void refreshSessions()
@@ -609,7 +654,7 @@ export default function App() {
   const runCard = useCallback(
     async (
       anchor: Anchor,
-      depth: Depth,
+      level: string,
       text: string,
       existingCardId: string | null,
       sourceText: string,
@@ -627,7 +672,7 @@ export default function App() {
                   ? `${current.answer}\n\n---\n\n**追问：** ${text}\n\n`
                   : '',
               streaming: true,
-              depth,
+              level,
               question: text,
               sourceText,
             }
@@ -641,7 +686,8 @@ export default function App() {
             mode: 'card',
             text,
             anchor,
-            depth,
+            profile_id: activeProfile.id,
+            level,
             card_id: existingCardId ?? undefined,
             card_history: cardHistory,
           },
@@ -690,7 +736,7 @@ export default function App() {
         }
       }
     },
-    [beginTool, finishTool, clearTool],
+    [activeProfile.id, beginTool, finishTool, clearTool],
   )
 
   const submitPromotion = useCallback(
@@ -772,10 +818,11 @@ export default function App() {
     try {
       const hit = await matchEntry(anchor.quote)
       if (hit) {
+        const level = resolveLevel(activeProfile, hit.depth)
         setCard({
           ...base,
-          depth: hit.depth,
-          answer: `**已有记录**（${DEPTH_LABEL[hit.depth]} · ${MASTERY_LABEL[hit.mastery]} · 记于 ${hit.created_at.slice(0, 10)}）\n\n${hit.gist}\n\n> 这是账本里的旧结论。要重新讲一遍点「重新生成」。`,
+          level,
+          answer: `**已有记录**（${activeProfile.levels.find((item) => item.id === level)?.label ?? hit.depth} · ${MASTERY_LABEL[hit.mastery]} · 记于 ${hit.created_at.slice(0, 10)}）\n\n${hit.gist}\n\n> 这是账本里的旧结论。要重新讲一遍点「重新生成」。`,
           streaming: false,
           saved: true,
         })
@@ -785,9 +832,10 @@ export default function App() {
       // 查不到就当新词处理
     }
 
-    setCard({ ...base, depth: 'can_tune', answer: '', streaming: true, saved: false })
-    void runCard(anchor, 'can_tune', t('请解释这段内容。'), null, sourceText)
-  }, [pending, runCard])
+    const level = resolveLevel(activeProfile)
+    setCard({ ...base, level, answer: '', streaming: true, saved: false })
+    void runCard(anchor, level, t('请解释这段内容。'), null, sourceText)
+  }, [activeProfile, pending, runCard, t])
 
   const saveCard = useCallback(async () => {
     if (!card || !card.answer.trim() || card.saved) return
@@ -795,15 +843,17 @@ export default function App() {
       await saveGlossary({
         term: card.anchor.quote.slice(0, 80),
         gist: stripMarkdown(card.answer).slice(0, 160),
-        depth: card.depth,
+        depth: depthForLevel(activeProfile, card.level),
         anchor: card.anchor,
+        profile_id: activeProfile.id,
+        level: card.level,
       })
       setCard((current) => (current ? { ...current, saved: true } : current))
       if (glossaryOpen) void refreshGlossary(query)
     } catch (err) {
       setError(String(err))
     }
-  }, [card, glossaryOpen, query, refreshGlossary])
+  }, [activeProfile, card, glossaryOpen, query, refreshGlossary])
 
   const closeCard = useCallback(async () => {
     await saveCard()
@@ -927,6 +977,7 @@ export default function App() {
             <span className="status-dot" />
             {settings?.model || t('未配置模型')}
           </span>
+          <button className="ghost" onClick={() => setShowProfiles(true)}>{t('模板')}</button>
           <button className="ghost" onClick={() => setShowSettings(true)}>{t('设置')}</button>
           {!topicPageId && !coursePageId && (
             <button onClick={() => setGlossaryOpen((value) => !value)}>
@@ -1060,16 +1111,17 @@ export default function App() {
 
       <CardLayer
         card={card}
+        profile={activeProfile}
         onClose={() => void closeCard()}
-        onDepthChange={(depth) => {
+        onDepthChange={(level) => {
           if (!card) return
-          void runCard(card.anchor, depth, card.question, cardIdRef.current ?? card.id, card.sourceText)
+          void runCard(card.anchor, level, card.question, cardIdRef.current ?? card.id, card.sourceText)
         }}
         onFollowUp={(text) => {
           if (!card) return
           void runCard(
             card.anchor,
-            card.depth,
+            resolveLevel(activeProfile, card.level),
             text,
             cardIdRef.current ?? card.id,
             card.sourceText,
@@ -1081,7 +1133,13 @@ export default function App() {
         onRegenerate={() => {
           if (!card) return
           setCard({ ...card, saved: false })
-          void runCard(card.anchor, card.depth, t('请重新解释这段内容。'), cardIdRef.current ?? card.id, card.sourceText)
+          void runCard(
+            card.anchor,
+            resolveLevel(activeProfile, card.level),
+            t('请重新解释这段内容。'),
+            cardIdRef.current ?? card.id,
+            card.sourceText,
+          )
         }}
         onPromote={() => {
           if (card) setPromote(card)
@@ -1097,6 +1155,7 @@ export default function App() {
       {promote && (
         <PromoteDialog
           card={promote}
+          initialDepth={depthForLevel(activeProfile, promote.level)}
           parentTitle={sessions.find((item) => item.id === sessionId)?.title ?? ''}
           topics={topics}
           busy={promoting}
@@ -1154,6 +1213,15 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {showProfiles && (
+        <ProfilesModal
+          profiles={profiles}
+          activeId={activeProfile.id}
+          onReload={refreshProfiles}
+          onClose={() => setShowProfiles(false)}
+        />
       )}
 
       {showSettings && settings && (

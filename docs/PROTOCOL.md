@@ -147,3 +147,34 @@ macOS 上通过 `CFBundleURLTypes` 注册，`RunEvent::Opened` 接收；应用�
 4. 打断：`POST /api/turns/{id}/cancel`。
 
 参考实现：`ask-agent.nvim` 的 `lua/ask_agent/backends/deck.lua`（约 190 行，含注释）。
+
+
+## 9. 卡片模板（profile）
+
+卡片不是只有一种形状。「模板」定义一套**拆分范式**：轴叫什么、分几档、每档讲到哪停、
+卡片按哪些小节输出。档位数量由使用者决定（2–9 档）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/profiles` | `{active, profiles:[…]}` |
+| POST | `/api/profiles` | `{from?, label?}` 复制一份（id 服务端生成） |
+| PUT | `/api/profiles/{id}` | 更新（body 可不带 id） |
+| DELETE | `/api/profiles/{id}` | 不能删当前默认、不能删最后一个 |
+| PUT | `/api/profiles/active` | `{id}` 设为默认 |
+
+模板存放在数据目录的 `profiles/*.json`，是**文件**不是代码：可以备份、可以分享、可以进版本库。
+内置两份：`tech`（能调/能改/能推）与 `language-en`（认得/会用/用得对）。
+
+卡片请求可以带 `profile_id` 与 `level`；两个都缺省时用当前默认模板的默认档。
+
+```json
+{
+  "id": "tech", "label": "编程 / 技术", "axis_label": "理解深度",
+  "default_level": "can_tune", "max_chars": 260,
+  "sections": ["一句话定义", "在当前位置的角色", "需要的理解深度", "前置依赖（一层）", "下一步"],
+  "levels": [{ "id": "can_use", "label": "能调", "stop": "只给会用所需的…" }],
+  "system": "你是「卡片」…"
+}
+```
+
+`stop` 是每档的**停止条件**，也是这套设计里唯一不可省的字段：没有它，档位只是标签。

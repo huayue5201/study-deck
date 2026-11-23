@@ -71,6 +71,12 @@ pub struct Card {
     pub session_id: SessionId,
     pub anchor: Anchor,
     pub depth: Depth,
+    /// 生成这张卡片用的模板；老数据为 None（按内置 tech 处理）。
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    /// 用户当时选的档位 id；老数据为 None（按 depth 映射）。
+    #[serde(default)]
+    pub level: Option<String>,
     pub question: String,
     pub answer: String,
     /// 这张卡片升级成的专题会话；None 表示还没升级。

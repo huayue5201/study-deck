@@ -322,6 +322,17 @@ fn migrate(conn: &Connection) -> Result<()> {
             )?;
             Ok(())
         }),
+        (10, |c| {
+            // 卡片模板：记下这张卡/这条账本是在哪套范式、哪一档下得到的
+            ensure_column(c, "cards", "profile_id", "TEXT")?;
+            ensure_column(c, "cards", "level", "TEXT")?;
+            ensure_column(c, "glossary", "profile_id", "TEXT")?;
+            ensure_column(c, "glossary", "level", "TEXT")?;
+            c.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_glossary_profile ON glossary(profile_id);",
+            )?;
+            Ok(())
+        }),
     ];
 
     for (version, step) in steps {
@@ -733,8 +744,8 @@ impl Store {
 
     pub fn add_card(&self, card: &Card) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO cards (id, session_id, message_id, char_start, char_end, quote, depth, question, answer, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO cards (id, session_id, message_id, char_start, char_end, quote, depth, question, answer, created_at, profile_id, level)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 card.id.as_str(),
                 card.session_id.as_str(),
@@ -745,7 +756,9 @@ impl Store {
                 card.depth.as_str(),
                 card.question,
                 card.answer,
-                card.created_at.to_rfc3339()
+                card.created_at.to_rfc3339(),
+                card.profile_id,
+                card.level
             ],
         )?;
         Ok(())
@@ -764,6 +777,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT id, session_id, message_id, char_start, char_end, quote, depth, question, answer,
                     created_at, promoted_session_id
+             , profile_id, level
              FROM cards WHERE session_id = ?1 ORDER BY rowid ASC",
         )?;
         let rows = stmt.query_map(params![session_id], map_card)?;
@@ -775,8 +789,8 @@ impl Store {
     pub fn insert_entry(&self, entry: &GlossaryEntry) -> Result<()> {
         let anchor = entry.source_anchor.clone();
         self.conn().execute(
-            "INSERT INTO glossary (id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO glossary (id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id, updated_at, profile_id, level)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 entry.id.as_str(),
                 entry.term,
@@ -789,7 +803,9 @@ impl Store {
                 entry.created_at.to_rfc3339(),
                 entry.mastery.as_str(),
                 entry.session_id.as_ref().map(|s| s.to_string()),
-                entry.created_at.to_rfc3339()
+                entry.created_at.to_rfc3339(),
+                entry.profile_id,
+                entry.level
             ],
         )?;
         Ok(())
@@ -878,7 +894,7 @@ impl Store {
         let exact: Option<GlossaryEntry> = self
             .conn()
             .query_row(
-                "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id
+                "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id, profile_id, level
                  FROM glossary WHERE lower(trim(term)) = lower(trim(?1))
                  ORDER BY rowid DESC LIMIT 1",
                 params![needle],
@@ -891,7 +907,7 @@ impl Store {
         let fuzzy: Option<GlossaryEntry> = self
             .conn()
             .query_row(
-                "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id
+                "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id, profile_id, level
                  FROM glossary WHERE lower(term) LIKE lower(?1)
                  ORDER BY length(term) ASC, rowid DESC LIMIT 1",
                 params![format!("%{}%", needle)],
@@ -904,7 +920,7 @@ impl Store {
     pub fn all_entries(&self) -> Result<Vec<GlossaryEntry>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id
+            "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id, profile_id, level
              FROM glossary ORDER BY rowid DESC",
         )?;
         let rows = stmt.query_map([], map_entry)?;
@@ -919,7 +935,7 @@ impl Store {
         match (q, self.has_fts) {
             (Some(q), true) => {
                 let mut stmt = conn.prepare(
-                    "SELECT g.id, g.term, g.gist, g.depth, g.message_id, g.char_start, g.char_end, g.quote, g.created_at, g.mastery, g.session_id
+                    "SELECT g.id, g.term, g.gist, g.depth, g.message_id, g.char_start, g.char_end, g.quote, g.created_at, g.mastery, g.session_id, g.profile_id, g.level
                      FROM glossary_fts f JOIN glossary g ON g.rowid = f.rowid
                      WHERE glossary_fts MATCH ?1 ORDER BY rank LIMIT ?2",
                 )?;
@@ -931,7 +947,7 @@ impl Store {
             (Some(q), false) => {
                 let pattern = format!("%{}%", q);
                 let mut stmt = conn.prepare(
-                    "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id
+                    "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id, profile_id, level
                      FROM glossary WHERE term LIKE ?1 OR gist LIKE ?1 ORDER BY rowid DESC LIMIT ?2",
                 )?;
                 let rows = stmt.query_map(params![pattern, limit as i64], map_entry)?;
@@ -941,7 +957,7 @@ impl Store {
             }
             _ => {
                 let mut stmt = conn.prepare(
-                    "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id
+                    "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id, profile_id, level
                      FROM glossary ORDER BY rowid DESC LIMIT ?1",
                 )?;
                 let rows = stmt.query_map(params![limit as i64], map_entry)?;
@@ -2072,6 +2088,8 @@ fn map_card(row: &Row<'_>) -> rusqlite::Result<Card> {
         answer: row.get(8)?,
         created_at: parse_dt(&row.get::<_, String>(9)?),
         promoted_session_id: row.get::<_, Option<String>>(10)?.map(SessionId::from),
+        profile_id: row.get::<_, Option<String>>("profile_id").ok().flatten(),
+        level: row.get::<_, Option<String>>("level").ok().flatten(),
     })
 }
 
@@ -2196,6 +2214,8 @@ fn map_entry(row: &Row<'_>) -> rusqlite::Result<GlossaryEntry> {
         term: row.get(1)?,
         gist: row.get(2)?,
         depth: Depth::parse(&row.get::<_, String>(3)?).unwrap_or_default(),
+        profile_id: row.get::<_, Option<String>>("profile_id").ok().flatten(),
+        level: row.get::<_, Option<String>>("level").ok().flatten(),
         mastery: Mastery::parse(&row.get::<_, String>(9)?).unwrap_or_default(),
         source_anchor: anchor,
         session_id: row.get::<_, Option<String>>(10)?.map(SessionId::from),

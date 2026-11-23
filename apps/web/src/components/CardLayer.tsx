@@ -1,10 +1,11 @@
-import type { Depth } from '../lib/types'
+import type { CardProfile } from '../lib/types'
 import { Card, type OpenCardState } from './Card'
 
 interface Props {
   card: OpenCardState | null
+  profile: CardProfile
   onClose: () => void
-  onDepthChange: (depth: Depth) => void
+  onDepthChange: (level: string) => void
   onFollowUp: (text: string) => void
   onSave: () => void
   onRegenerate: () => void
@@ -14,6 +15,7 @@ interface Props {
 
 export function CardLayer({
   card,
+  profile,
   onClose,
   onDepthChange,
   onFollowUp,
@@ -27,6 +29,7 @@ export function CardLayer({
     <div className="card-layer">
       <Card
         card={card}
+        profile={profile}
         onClose={onClose}
         onDepthChange={onDepthChange}
         onFollowUp={onFollowUp}

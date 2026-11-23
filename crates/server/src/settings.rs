@@ -15,6 +15,9 @@ pub struct Settings {
     pub model: String,
     #[serde(default)]
     pub configured: bool,
+    /// 当前选中的卡片模板 id；None 时用第一个可用模板。
+    #[serde(default)]
+    pub active_profile: Option<String>,
 }
 
 impl Default for Settings {
@@ -24,6 +27,7 @@ impl Default for Settings {
             base_url: "https://api.deepseek.com".into(),
             model: "deepseek-chat".into(),
             configured: false,
+            active_profile: None,
         }
     }
 }

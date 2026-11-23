@@ -2,6 +2,7 @@
 //! 这是整个项目里最值钱的 300 行。
 
 use studydeck_core::{
+    profiles::CardProfile,
     Anchor, Block, ContextAssembler, Depth, Message, Mode, Role, SessionSeed, Topic, TurnRequest,
 };
 
@@ -76,7 +77,20 @@ fn compact_history(messages: &[Message], max_chars: usize) -> String {
 }
 
 pub struct MainAssembler;
-pub struct CardAssembler;
+
+/// 卡片装配器：范式（轴/档位/小节/系统提示词）来自模板，机制不变。
+pub struct CardAssembler {
+    profile: CardProfile,
+}
+
+impl CardAssembler {
+    pub fn new(profile: Option<CardProfile>) -> Self {
+        let profile = profile
+            .filter(|candidate| candidate.is_valid())
+            .unwrap_or_else(CardProfile::builtin_tech);
+        Self { profile }
+    }
+}
 
 fn topic_block(topic: &Topic) -> String {
     let mut out = format!("当前会话属于专题《{}》。\n", topic.title);
@@ -185,14 +199,40 @@ impl ContextAssembler for CardAssembler {
     fn assemble(&self, request: &TurnRequest) -> Vec<Block> {
         let depth = request.depth.unwrap_or(Depth::CanTune);
         let follow_up = request.card_history.is_some();
-        let mut system = String::from(if follow_up {
-            CARD_CHAT_SYSTEM
+        let profile = &self.profile;
+        let level = profile.resolved_level(request.level.as_deref());
+
+        let mut system = String::new();
+        if follow_up {
+            // 卡片内的追问：不复述模板小节，像对话一样答
+            system.push_str(CARD_CHAT_SYSTEM);
         } else {
-            CARD_SYSTEM
-        });
-        system.push_str("\n本张卡片的理解深度约定：");
-        system.push_str(depth.directive());
-        system.push('\n');
+            system.push_str(&profile.system);
+            system.push('\n');
+            if !profile.sections.is_empty() {
+                system.push_str("\n严格按以下小节输出（每段标题加粗）：\n");
+                for (index, section) in profile.sections.iter().enumerate() {
+                    system.push_str(&format!("{}. {section}\n", index + 1));
+                }
+            }
+            system.push_str(&format!(
+                "\n全文控制在 {} 字以内。只展开一层：出现新的前置概念时只报名字，绝不继续解释。\n",
+                profile.max_chars
+            ));
+        }
+
+        if let Some(level) = level {
+            system.push_str(&format!(
+                "\n本次档位：{}（{}）\n讲解停在这里：{}\n",
+                level.label,
+                profile.axis_label,
+                if level.stop.trim().is_empty() { "按该档位的常识边界收住" } else { &level.stop }
+            ));
+        } else {
+            system.push_str("\n本张卡片的理解深度约定：");
+            system.push_str(depth.directive());
+            system.push('\n');
+        }
 
         let anchor = request.anchor.clone().unwrap_or_else(|| {
             Anchor::new(
@@ -255,7 +295,8 @@ pub fn describe(mode: Mode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use studydeck_core::{BlockRole, CardId, MessageId, SessionId, TopicId};
+    use studydeck_core::{
+    profiles::CardProfile,BlockRole, CardId, MessageId, SessionId, TopicId};
 
     fn seed() -> SessionSeed {
         SessionSeed {
@@ -285,6 +326,8 @@ mod tests {
             topic: None,
             seed: Some(seed()),
             project_root: None,
+            profile: None,
+            level: None,
             history: Vec::new(),
         }
     }
@@ -325,9 +368,11 @@ mod tests {
             topic: None,
             seed: None,
             project_root: None,
+            profile: None,
+            level: None,
             history: Vec::new(),
         };
-        let blocks = CardAssembler.assemble(&request);
+        let blocks = CardAssembler::new(None).assemble(&request);
         let system = blocks
             .iter()
             .filter(|block| block.role == studydeck_core::BlockRole::System)
@@ -350,9 +395,11 @@ mod tests {
             topic: None,
             seed: None,
             project_root: None,
+            profile: None,
+            level: None,
             history: Vec::new(),
         };
-        let blocks = CardAssembler.assemble(&request);
+        let blocks = CardAssembler::new(None).assemble(&request);
         let text: String = blocks
             .iter()
             .map(|block| block.text.as_str())
@@ -407,6 +454,8 @@ mod tests {
             topic: Some(topic),
             seed: None,
             project_root: None,
+            profile: None,
+            level: None,
             history: Vec::new(),
         };
         let blocks = MainAssembler.assemble(&request);
@@ -418,5 +467,65 @@ mod tests {
             .join("\n");
         assert!(system.contains("当前会话属于专题《采样定理》"));
         assert!(system.contains("离散化基础"));
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    fn card_request(profile: Option<CardProfile>, level: Option<&str>) -> TurnRequest {
+        TurnRequest {
+            mode: Mode::Card,
+            text: "这句话什么意思".into(),
+            anchor: Some(Anchor::new(
+                studydeck_core::MessageId("m1".into()),
+                0,
+                4,
+                "采样率",
+            )),
+            depth: Some(Depth::CanTune),
+            profile,
+            level: level.map(|value| value.to_string()),
+            parent_card: None,
+            card_history: None,
+            topic: None,
+            seed: None,
+            project_root: None,
+            history: vec![],
+        }
+    }
+
+    #[test]
+    fn card_system_follows_profile_level_and_sections() {
+        let profile = CardProfile::builtin_language_en();
+        let request = card_request(Some(profile), Some("register"));
+        let blocks = CardAssembler::new(request.profile.clone()).assemble(&request);
+        let system = &blocks.first().expect("system block").text;
+
+        assert!(system.contains("词性与常见搭配"), "小节来自模板: {system}");
+        assert!(system.contains("用得对"), "档位名来自模板: {system}");
+        assert!(system.contains("语域"), "档位停止条件来自模板: {system}");
+        assert!(!system.contains("能调"), "不应混入 tech 范式: {system}");
+    }
+
+    #[test]
+    fn unknown_level_falls_back_to_default_level() {
+        let profile = CardProfile::builtin_language_en();
+        let request = card_request(Some(profile), Some("does-not-exist"));
+        let blocks = CardAssembler::new(request.profile.clone()).assemble(&request);
+        let system = &blocks.first().expect("system block").text;
+        // 默认档是 use
+        assert!(system.contains("会用"), "回落到 default_level: {system}");
+    }
+
+    #[test]
+    fn invalid_profile_falls_back_to_tech() {
+        let mut broken = CardProfile::builtin_language_en();
+        broken.levels.clear();
+        let request = card_request(Some(broken), Some("register"));
+        let blocks = CardAssembler::new(request.profile.clone()).assemble(&request);
+        let system = &blocks.first().expect("system block").text;
+        assert!(system.contains("前置依赖（一层）"), "空模板应回落到内置 tech: {system}");
     }
 }

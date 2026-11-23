@@ -28,7 +28,7 @@ pub async fn run_turn(
 ) -> Result<TurnOutcome> {
     let assembler: Box<dyn ContextAssembler> = match request.mode {
         Mode::Main => Box::new(MainAssembler),
-        Mode::Card => Box::new(CardAssembler),
+        Mode::Card => Box::new(CardAssembler::new(request.profile.clone())),
     };
 
     let mut messages: Vec<ChatMessage> = assembler

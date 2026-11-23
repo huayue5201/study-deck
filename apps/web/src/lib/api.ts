@@ -7,11 +7,13 @@ import type {
   TestResult,
   TurnView,
   Anchor,
+  CardProfile,
   ChatBody,
   Depth,
   GlossaryEntry,
   Health,
   Mastery,
+  ProfilesResponse,
   SessionView,
   PromotionResult,
   Topic,
@@ -51,6 +53,51 @@ async function readJson<T>(response: Response): Promise<T> {
 
 export async function fetchHealth(): Promise<Health> {
   return readJson<Health>(await api('/api/health'))
+}
+
+export async function listProfiles(): Promise<ProfilesResponse> {
+  return readJson<ProfilesResponse>(await api('/api/profiles'))
+}
+
+/** 以现有模板为底稿复制一份，id 由后端生成。 */
+export async function createProfile(input: { from: string; label: string }): Promise<CardProfile> {
+  return readJson<CardProfile>(
+    await api('/api/profiles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+  )
+}
+
+export async function updateProfile(
+  id: string,
+  input: Omit<CardProfile, 'id'>,
+): Promise<CardProfile> {
+  return readJson<CardProfile>(
+    await api(`/api/profiles/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+  )
+}
+
+export async function deleteProfile(id: string): Promise<void> {
+  await readJson<{ ok: boolean }>(
+    await api(`/api/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  )
+}
+
+export async function setActiveProfile(id: string): Promise<string> {
+  const data = await readJson<{ active: string }>(
+    await api('/api/profiles/active', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }),
+  )
+  return data.active
 }
 
 export async function createSession(): Promise<string> {
@@ -118,6 +165,9 @@ export async function saveGlossary(input: {
   gist: string
   depth: Depth
   anchor?: Anchor
+  /** 任意档位 id：账本按模板隔离，避免跨范式串味 */
+  profile_id?: string
+  level?: string
 }): Promise<GlossaryEntry> {
   return readJson<GlossaryEntry>(
     await api('/api/glossary', {

@@ -1,5 +1,43 @@
 export type Depth = 'can_use' | 'can_tune' | 'can_derive'
 
+export interface CardLevel {
+  id: string
+  label: string
+  stop: string
+}
+
+export interface CardProfile {
+  id: string
+  label: string
+  axis_label: string
+  default_level: string
+  max_chars: number
+  sections: string[]
+  levels: CardLevel[]
+  system: string
+}
+
+export interface ProfilesResponse {
+  active: string
+  profiles: CardProfile[]
+}
+
+/** 后端还没就绪时的兜底模板：保证卡片始终有档位可渲染。 */
+export const FALLBACK_PROFILE: CardProfile = {
+  id: 'tech',
+  label: '编程 / 技术',
+  axis_label: '理解深度',
+  default_level: 'can_tune',
+  max_chars: 260,
+  sections: ['一句话定义', '在当前位置的角色', '需要的理解深度', '前置依赖（一层）', '下一步'],
+  levels: [
+    { id: 'can_use', label: '能调', stop: '只要会用：一句话定义 + 它在这里承担什么角色' },
+    { id: 'can_tune', label: '能改', stop: '要能改：关键参数、边界条件、常见误用' },
+    { id: 'can_derive', label: '能推', stop: '要能推：核心机制的推导骨架' },
+  ],
+  system: '你是「卡片」：围绕用户选中的一小段内容就地解释，严格按给定小节输出，不要扩写成教程。',
+}
+
 export interface Anchor {
   message_id: string
   char_start: number
@@ -154,6 +192,8 @@ export interface ChatBody {
   text: string
   anchor?: Anchor
   depth?: Depth
+  profile_id?: string
+  level?: string
   card_id?: string
   card_history?: string
 }

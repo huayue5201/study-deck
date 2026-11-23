@@ -28,7 +28,8 @@ use serde::Deserialize;
 use serde_json::json;
 use store::Store;
 use studydeck_core::{
-    AgentEvent, Anchor, Card, CardId, Course, CourseItemStatus, Depth, GlossaryEntry, Mastery,
+    AgentEvent, Anchor, Card, CardId, CardProfile, Course, CourseItemStatus, Depth, GlossaryEntry,
+    Mastery,
     Message, MessageStatus, Mode, SessionId, Topic, TopicEdgeKind, TopicNodeStatus, TurnRequest,
     Usage,
 };
@@ -36,10 +37,12 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 
+mod profiles;
 mod secrets;
 mod settings;
 mod turn;
 
+use profiles::Profiles;
 use turn::{Registry, Turn, TurnState, TurnView};
 
 pub use settings::{presets, Settings, SettingsStore, SettingsView};
@@ -76,6 +79,7 @@ struct AppState {
     settings: SettingsStore,
     provider: RwLock<Arc<dyn Provider>>,
     registry: Registry,
+    profiles: Profiles,
     token: String,
 }
 
@@ -184,12 +188,14 @@ pub async fn run_with_ready(
         }
     });
 
+    let settings_for_profiles = settings_store.clone();
     let state = Arc::new(AppState {
         store: Arc::new(store),
         data_dir: data_dir.clone(),
         settings: settings_store,
         provider: RwLock::new(provider),
         registry: Registry::default(),
+        profiles: Profiles::new(&data_dir.join("profiles"), settings_for_profiles),
         token,
     });
 
@@ -199,6 +205,12 @@ pub async fn run_with_ready(
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/settings/test", post(test_connection))
         .route("/api/settings/key", axum::routing::delete(clear_key))
+        .route("/api/profiles", get(list_profiles).post(create_profile))
+        .route("/api/profiles/active", axum::routing::put(set_active_profile))
+        .route(
+            "/api/profiles/{id}",
+            axum::routing::put(update_profile).delete(delete_profile),
+        )
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/resolve", get(resolve_session_cwd))
         .route(
@@ -428,11 +440,13 @@ async fn put_settings(
         }
     }
 
+    let previous = state.settings.load();
     let settings = Settings {
         provider: body.provider,
         base_url,
         model,
         configured: true,
+        active_profile: previous.active_profile,
     };
     if let Err(err) = state.settings.save(&settings) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
@@ -1578,6 +1592,10 @@ struct TurnSpec {
     card_id: Option<String>,
     card_history: Option<String>,
     project_root: Option<PathBuf>,
+    /// 卡片模板 id；None = 用当前默认模板
+    profile_id: Option<String>,
+    /// 用户选的档位 id
+    level: Option<String>,
 }
 
 struct StartedTurn {
@@ -1667,6 +1685,23 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
     }
 
     // 卡片模式只有卡记录；主线模式建 user + assistant 两行
+    // 卡片模板与档位：请求显式指定 > 当前默认模板 > 内置 tech
+    let (resolved_profile, resolved_level) = match spec.mode {
+        Mode::Card => {
+            let profile = spec
+                .profile_id
+                .as_deref()
+                .and_then(|id| state.profiles.get(id))
+                .or_else(|| state.profiles.active())
+                .unwrap_or_else(CardProfile::builtin_tech);
+            let level = profile
+                .resolved_level(spec.level.as_deref())
+                .map(|level| level.id.clone());
+            (Some(profile), level)
+        }
+        Mode::Main => (None, None),
+    };
+
     let (assistant_id, card_id) = match spec.mode {
         Mode::Main => {
             let mut user = Message::user(&spec.session_id, spec.text.clone());
@@ -1705,6 +1740,8 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
                 session_id: spec.session_id.clone(),
                 anchor,
                 depth: spec.depth.unwrap_or_default(),
+                profile_id: resolved_profile.as_ref().map(|profile| profile.id.clone()),
+                level: resolved_level.clone(),
                 question: spec.text.clone(),
                 answer: String::new(),
                 promoted_session_id: None,
@@ -1745,6 +1782,8 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
         topic,
         seed,
         project_root,
+        profile: resolved_profile,
+        level: Some(resolved_level.unwrap_or_default()).filter(|value| !value.is_empty()),
         history,
     };
 
@@ -1951,6 +1990,10 @@ struct ChatBody {
     card_id: Option<String>,
     #[serde(default)]
     card_history: Option<String>,
+    /// 卡片模板 id（不传 = 当前默认模板）
+    profile_id: Option<String>,
+    /// 档位 id（不传 = 模板默认档）
+    level: Option<String>,
 }
 
 fn default_mode() -> String {
@@ -1979,6 +2022,8 @@ async fn chat(State(state): State<Arc<AppState>>, Json(body): Json<ChatBody>) ->
         card_id: body.card_id,
         card_history: body.card_history,
         project_root: None,
+        profile_id: body.profile_id,
+        level: body.level,
     };
     match begin_turn(&state, spec) {
         Ok(started) => respond_with_turn(started),
@@ -2069,6 +2114,8 @@ async fn ask(State(state): State<Arc<AppState>>, Json(body): Json<AskBody>) -> R
         } else {
             Some(PathBuf::from(cwd))
         },
+        profile_id: None,
+        level: None,
     };
     match begin_turn(&state, spec) {
         Ok(started) => respond_with_turn(started),
@@ -2187,6 +2234,8 @@ struct GlossaryBody {
     anchor: Option<Anchor>,
     session_id: Option<String>,
     mastery: Option<String>,
+    profile_id: Option<String>,
+    level: Option<String>,
 }
 
 async fn add_glossary(
@@ -2203,6 +2252,8 @@ async fn add_glossary(
         body.anchor,
     );
     entry.session_id = body.session_id.map(SessionId::from);
+    entry.profile_id = body.profile_id;
+    entry.level = body.level;
     entry.mastery = body
         .mastery
         .as_deref()
@@ -2379,6 +2430,127 @@ async fn export_glossary(
         out,
     )
         .into_response()
+}
+
+// ---------- 卡片模板 ----------
+
+fn valid_profile(profile: &CardProfile) -> std::result::Result<(), String> {
+    if profile.label.trim().is_empty() {
+        return Err("模板名不能为空".into());
+    }
+    if profile.levels.is_empty() {
+        return Err("至少要有一个档位".into());
+    }
+    if profile.levels.len() > 9 {
+        return Err("最多 9 个档位".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for level in &profile.levels {
+        let id = level.id.trim();
+        if id.is_empty()
+            || !id
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
+        {
+            return Err(format!("档位 id 只能用小写字母/数字/-/_：{}", level.label));
+        }
+        if !seen.insert(id.to_string()) {
+            return Err(format!("档位 id 重复：{id}"));
+        }
+        if level.label.trim().is_empty() {
+            return Err("档位名不能为空".into());
+        }
+    }
+    Ok(())
+}
+
+async fn list_profiles(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(json!({
+        "active": state.profiles.active_id(),
+        "profiles": state.profiles.list(),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileCreate {
+    from: Option<String>,
+    label: Option<String>,
+}
+
+async fn create_profile(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ProfileCreate>,
+) -> impl IntoResponse {
+    let base = body
+        .from
+        .as_deref()
+        .and_then(|id| state.profiles.get(id))
+        .or_else(|| state.profiles.active())
+        .unwrap_or_else(CardProfile::builtin_tech);
+
+    let label = body
+        .label
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("{} 副本", base.label));
+
+    let mut profile = base;
+    profile.id = state.profiles.unique_id(&label);
+    profile.label = label;
+
+    if let Err(err) = state.profiles.save(&profile) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+    (StatusCode::CREATED, Json(json!(profile))).into_response()
+}
+
+async fn update_profile(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(mut body): Json<CardProfile>,
+) -> impl IntoResponse {
+    if state.profiles.get(&id).is_none() {
+        return api_error(StatusCode::NOT_FOUND, "模板不存在");
+    }
+    body.id = id;
+    if let Err(err) = valid_profile(&body) {
+        return api_error(StatusCode::BAD_REQUEST, err);
+    }
+    if let Err(err) = state.profiles.save(&body) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+    Json(json!(body)).into_response()
+}
+
+async fn delete_profile(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    if state.profiles.active_id() == id {
+        return api_error(StatusCode::CONFLICT, "不能删除当前默认模板");
+    }
+    if state.profiles.list().len() <= 1 {
+        return api_error(StatusCode::CONFLICT, "至少要保留一个模板");
+    }
+    match state.profiles.delete(&id) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(err) => api_error(StatusCode::NOT_FOUND, err.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ActiveProfileBody {
+    id: String,
+}
+
+async fn set_active_profile(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ActiveProfileBody>,
+) -> impl IntoResponse {
+    match state.profiles.set_active(&body.id) {
+        Ok(()) => Json(json!({ "active": body.id })).into_response(),
+        Err(err) => api_error(StatusCode::NOT_FOUND, err.to_string()),
+    }
 }
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> Response {

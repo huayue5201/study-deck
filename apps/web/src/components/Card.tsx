@@ -2,12 +2,12 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { renderMarkdown } from '../lib/markdown'
 import { useI18n } from '../lib/i18n'
 import { isImeComposing } from '../lib/ime'
-import { DEPTH_HINT, DEPTH_LABEL, type Anchor, type Depth } from '../lib/types'
+import type { Anchor, CardProfile } from '../lib/types'
 
 export interface OpenCardState {
   id: string | null
   anchor: Anchor
-  depth: Depth
+  level: string
   question: string
   answer: string
   streaming: boolean
@@ -19,8 +19,9 @@ export interface OpenCardState {
 
 interface Props {
   card: OpenCardState
+  profile: CardProfile
   onClose: () => void
-  onDepthChange: (depth: Depth) => void
+  onDepthChange: (level: string) => void
   onFollowUp: (text: string) => void
   onSave: () => void
   onRegenerate: () => void
@@ -28,12 +29,26 @@ interface Props {
   onOpenPromoted: () => void
 }
 
-const DEPTHS: Depth[] = ['can_use', 'can_tune', 'can_derive']
-
 const MARGIN = 8
+
+/** 把坐标夹进视口；宽高取卡片当前真实尺寸。 */
+function clampToViewport(
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+): { left: number; top: number } {
+  const maxLeft = Math.max(MARGIN, window.innerWidth - width - MARGIN)
+  const maxTop = Math.max(MARGIN, window.innerHeight - height - MARGIN)
+  return {
+    left: Math.max(MARGIN, Math.min(left, maxLeft)),
+    top: Math.max(MARGIN, Math.min(top, maxTop)),
+  }
+}
 
 export function Card({
   card,
+  profile,
   onClose,
   onDepthChange,
   onFollowUp,
@@ -48,6 +63,13 @@ export function Card({
   const ref = useRef<HTMLDivElement | null>(null)
   const drag = useRef<{ dx: number; dy: number } | null>(null)
 
+  const levels = profile.levels
+  const selectedLevel =
+    levels.find((level) => level.id === card.level) ??
+    levels.find((level) => level.id === profile.default_level) ??
+    levels[0]
+  const longList = levels.length > 4
+
   const submit = () => {
     const text = draft.trim()
     if (!text || card.streaming) return
@@ -58,9 +80,8 @@ export function Card({
   /** 摆位：优先放在选区下方；下方放不下就翻到上方；最后夹进视口。 */
   const place = useCallback(() => {
     const el = ref.current
-    const width = el?.offsetWidth ?? 480
-    const height = Math.min(el?.offsetHeight ?? 460, window.innerHeight * 0.7)
-    const maxLeft = Math.max(MARGIN, window.innerWidth - width - MARGIN)
+    const width = el?.offsetWidth ?? 510
+    const height = el?.offsetHeight ?? Math.min(460, window.innerHeight * 0.7)
     const maxTop = Math.max(MARGIN, window.innerHeight - height - MARGIN)
 
     const below = card.rect.top + card.rect.height + 8
@@ -68,8 +89,7 @@ export function Card({
     let top = below
     if (below > maxTop) top = above >= MARGIN ? above : maxTop
 
-    const left = Math.max(MARGIN, Math.min(card.rect.left, maxLeft))
-    setPos({ left, top: Math.max(MARGIN, Math.min(top, maxTop)) })
+    setPos(clampToViewport(card.rect.left, top, width, height))
   }, [card.rect])
 
   useLayoutEffect(() => {
@@ -81,19 +101,53 @@ export function Card({
     const onResize = () => {
       const el = ref.current
       if (!el) return
-      setPos((current) => {
-        if (!current) return current
-        const maxLeft = Math.max(MARGIN, window.innerWidth - el.offsetWidth - MARGIN)
-        const maxTop = Math.max(MARGIN, window.innerHeight - el.offsetHeight - MARGIN)
-        return {
-          left: Math.max(MARGIN, Math.min(current.left, maxLeft)),
-          top: Math.max(MARGIN, Math.min(current.top, maxTop)),
-        }
-      })
+      setPos((current) =>
+        current
+          ? clampToViewport(current.left, current.top, el.offsetWidth, el.offsetHeight)
+          : current,
+      )
     }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
+
+  // 流式输出会让卡片变高；尺寸一变就重新夹紧，不能等到用户手动拖回来。
+  useEffect(() => {
+    const el = ref.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => {
+      const width = el.offsetWidth
+      const height = el.offsetHeight
+      setPos((current) => {
+        if (!current) return current
+        const next = clampToViewport(current.left, current.top, width, height)
+        return next.left === current.left && next.top === current.top ? current : next
+      })
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
+  // 卡片打开时，1–9 直接切档；输入框 / 文本域里不抢数字键。
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return
+      if (!/^[1-9]$/.test(event.key)) return
+      const target = event.target as HTMLElement | null
+      const tag = target?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) {
+        return
+      }
+      // 上层有弹窗时不抢数字键，避免改到弹窗背后的卡片。
+      if (target?.closest('.modal-backdrop')) return
+      const level = levels[Number(event.key) - 1]
+      if (!level || card.streaming) return
+      event.preventDefault()
+      onDepthChange(level.id)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [levels, card.streaming, onDepthChange])
 
   const startDrag = (event: React.PointerEvent<HTMLElement>) => {
     if ((event.target as HTMLElement).closest('button')) return
@@ -106,12 +160,7 @@ export function Card({
     if (!drag.current) return
     const el = ref.current
     if (!el) return
-    const maxLeft = Math.max(MARGIN, window.innerWidth - el.offsetWidth - MARGIN)
-    const maxTop = Math.max(MARGIN, window.innerHeight - el.offsetHeight - MARGIN)
-    setPos({
-      left: Math.max(MARGIN, Math.min(event.clientX - drag.current.dx, maxLeft)),
-      top: Math.max(MARGIN, Math.min(event.clientY - drag.current.dy, maxTop)),
-    })
+    setPos(clampToViewport(event.clientX - drag.current.dx, event.clientY - drag.current.dy, el.offsetWidth, el.offsetHeight))
   }
 
   const endDrag = (event: React.PointerEvent<HTMLElement>) => {
@@ -149,20 +198,37 @@ export function Card({
         {t('来自：{text}', { text: card.sourceText.replace(/\s+/g, ' ').slice(0, 40) || '主线对话' })}
       </div>
 
-      <div className="card-depth">
-        {DEPTHS.map((depth) => (
-          <button
-            key={depth}
-            className={card.depth === depth ? 'active' : ''}
-            title={t(DEPTH_HINT[depth])}
-            onClick={() => onDepthChange(depth)}
+      {longList ? (
+        <div className="card-depth long">
+          <select
+            value={selectedLevel?.id ?? ''}
+            title={selectedLevel?.stop ?? profile.axis_label}
             disabled={card.streaming}
+            onChange={(event) => onDepthChange(event.target.value)}
           >
-            {t(DEPTH_LABEL[depth])}
-          </button>
-        ))}
-        <span className="depth-hint">{t(DEPTH_HINT[card.depth])}</span>
-      </div>
+            {levels.map((level, index) => (
+              <option key={level.id} value={level.id} title={level.stop}>
+                {index + 1}. {level.label}
+              </option>
+            ))}
+          </select>
+          {selectedLevel && <span className="depth-hint">{selectedLevel.stop}</span>}
+        </div>
+      ) : (
+        <div className="card-depth">
+          {levels.map((level) => (
+            <button
+              key={level.id}
+              className={selectedLevel?.id === level.id ? 'active' : ''}
+              title={level.stop}
+              onClick={() => onDepthChange(level.id)}
+              disabled={card.streaming}
+            >
+              {level.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div
         className="card-body"

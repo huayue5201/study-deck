@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     anchor::Anchor,
     card::{Card, Depth},
+    profiles::CardProfile,
     session::Message,
     topic::{SessionSeed, Topic},
 };
@@ -22,6 +23,10 @@ pub struct TurnRequest {
     pub text: String,
     pub anchor: Option<Anchor>,
     pub depth: Option<Depth>,
+    /// 卡片模板；None 时退回内置 tech 范式。
+    pub profile: Option<CardProfile>,
+    /// 用户选的档位 id（profile 内有效）。
+    pub level: Option<String>,
     /// 已经存在的卡片，用于卡片内的追问
     pub parent_card: Option<Card>,
     /// 卡片内此前的追问/回答，用于多轮卡片对话。
