@@ -256,12 +256,22 @@ impl ContextAssembler for CardAssembler {
             )
         });
 
-        let source = request
-            .history
-            .iter()
-            .find(|message| message.id == anchor.message_id)
-            .map(|message| message.text.clone())
-            .unwrap_or_default();
+        // 嵌套卡：源文本是上一张卡的回答，而不是主线消息
+        let nesting = request.card_history.is_none() && request.parent_card.is_some();
+        let source = if nesting {
+            request
+                .parent_card
+                .as_ref()
+                .map(|parent| parent.answer.clone())
+                .unwrap_or_default()
+        } else {
+            request
+                .history
+                .iter()
+                .find(|message| message.id == anchor.message_id)
+                .map(|message| message.text.clone())
+                .unwrap_or_default()
+        };
 
         let window = if source.is_empty() {
             anchor.quote.clone()
@@ -286,6 +296,10 @@ impl ContextAssembler for CardAssembler {
             user.push_str(&trimmed);
             user.push('\n');
         } else if let Some(parent) = &request.parent_card {
+            if parent.parent_card_id.is_some() || request.anchor.is_some() {
+                // 嵌套展开：上面已经给了父卡的上下文窗口，这里只补一句关系
+                user.push_str("\n【这张卡是在上一张卡的这段文字上继续展开的】\n");
+            }
             user.push_str("\n【本卡片已有的解释（追问请在此基础上补充，不要重复）】\n");
             let trimmed: String = parent.answer.chars().take(500).collect();
             user.push_str(&trimmed);

@@ -70,6 +70,25 @@ pub struct GlossaryEntry {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
+    /// 这一个概念被展开过几次（每次是一个 Encounter）。
+    #[serde(default)]
+    pub encounter_count: u32,
+    #[serde(default)]
+    pub last_seen: Option<DateTime<Utc>>,
+}
+
+/// 一次「遇到」：在哪个上下文、用哪套模板哪一档、得到什么结论。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Encounter {
+    pub id: String,
+    pub entry_id: EntryId,
+    pub gist: String,
+    pub profile_id: Option<String>,
+    pub level: Option<String>,
+    pub session_id: Option<SessionId>,
+    /// 若是在某张卡上展开的，记下父卡
+    pub parent_card_id: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 impl GlossaryEntry {
@@ -91,6 +110,8 @@ impl GlossaryEntry {
             session_id: None,
             created_at: Utc::now(),
             updated_at: None,
+            encounter_count: 0,
+            last_seen: None,
         }
     }
 }

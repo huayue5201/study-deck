@@ -3995,6 +3995,7 @@ dependencies = [
  "serde",
  "serde_json",
  "studydeck-core",
+ "uuid",
 ]
 
 [[package]]

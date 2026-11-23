@@ -64,6 +64,8 @@ interface PendingSelection {
   anchor: Anchor
   rect: { left: number; top: number; width: number; height: number }
   sourceText: string
+  /** 选区在卡片里时带上卡片 id（嵌套展开） */
+  fromCardId?: string
 }
 
 const OUTLINE_PROMPT =
@@ -164,6 +166,8 @@ export default function App() {
   } | null>(null)
   const [fake, setFake] = useState(false)
   const [card, setCard] = useState<OpenCardState | null>(null)
+  // 卡片栈：祖先在下，当前卡是 card
+  const [cardStack, setCardStack] = useState<OpenCardState[]>([])
   const [pending, setPending] = useState<PendingSelection | null>(null)
   const [streamingId, setStreamingId] = useState<string | null>(null)
   const [glossaryOpen, setGlossaryOpen] = useState(false)
@@ -687,6 +691,7 @@ export default function App() {
       sourceText: string,
       append = false,
       cardHistory?: string,
+      parentCardId?: string | null,
     ) => {
       const sid = sessionRef.current
       if (!sid) return
@@ -718,6 +723,7 @@ export default function App() {
             locale: lang,
             card_id: existingCardId ?? undefined,
             card_history: cardHistory,
+            parent_card_id: parentCardId ?? undefined,
           },
           (frame) => {
             if (frame.type === 'delta') {
@@ -756,6 +762,7 @@ export default function App() {
                   ...current,
                   id: matched?.id ?? null,
                   promotedSessionId: matched?.promoted_session_id ?? current.promotedSessionId,
+                  parentCardId: current.parentCardId,
                 }
               : current,
           )
@@ -823,15 +830,44 @@ export default function App() {
         height: info.rect.height,
       },
       sourceText: info.sourceText,
+      fromCardId: info.cardId,
     })
   }, [])
 
+
+  const saveCard = useCallback(async () => {
+    if (!card || !card.answer.trim() || card.saved) return
+    try {
+      await saveGlossary({
+        term: card.anchor.quote.slice(0, 80),
+        gist: stripMarkdown(card.answer).slice(0, 160),
+        depth: depthForLevel(activeProfile, card.level),
+        anchor: card.anchor,
+        profile_id: activeProfile.id,
+        level: card.level,
+        parent_card_id: card.parentCardId ?? undefined,
+      })
+      setCard((current) => (current ? { ...current, saved: true } : current))
+      if (glossaryOpen) void refreshGlossary(query)
+    } catch (err) {
+      setError(String(err))
+    }
+  }, [activeProfile, card, glossaryOpen, query, refreshGlossary])
+
   const openCard = useCallback(async () => {
     if (!pending) return
-    const { anchor, rect, sourceText } = pending
+    const { anchor, rect, sourceText, fromCardId } = pending
     setPending(null)
     window.getSelection()?.removeAllRanges()
     cardIdRef.current = null
+
+    // 嵌套展开：当前卡进栈（先落账，免得切走后丢失）
+    const nestingFrom =
+      fromCardId && card && card.id === fromCardId ? card : null
+    if (nestingFrom) {
+      await saveCard()
+      setCardStack((prev) => [...prev, { ...nestingFrom, saved: true }])
+    }
 
     const base = {
       id: null as string | null,
@@ -840,6 +876,7 @@ export default function App() {
       rect,
       sourceText,
       promotedSessionId: null as string | null,
+      parentCardId: nestingFrom?.id ?? null,
     }
 
     // 命中优先：账本里已经有这个词，就先把旧结论摆出来，别再花一次钱
@@ -862,30 +899,32 @@ export default function App() {
 
     const level = resolveLevel(activeProfile)
     setCard({ ...base, level, answer: '', streaming: true, saved: false })
-    void runCard(anchor, level, t('请解释这段内容。'), null, sourceText)
-  }, [activeProfile, pending, runCard, t])
-
-  const saveCard = useCallback(async () => {
-    if (!card || !card.answer.trim() || card.saved) return
-    try {
-      await saveGlossary({
-        term: card.anchor.quote.slice(0, 80),
-        gist: stripMarkdown(card.answer).slice(0, 160),
-        depth: depthForLevel(activeProfile, card.level),
-        anchor: card.anchor,
-        profile_id: activeProfile.id,
-        level: card.level,
-      })
-      setCard((current) => (current ? { ...current, saved: true } : current))
-      if (glossaryOpen) void refreshGlossary(query)
-    } catch (err) {
-      setError(String(err))
-    }
-  }, [activeProfile, card, glossaryOpen, query, refreshGlossary])
+    void runCard(anchor, level, t('请解释这段内容。'), null, sourceText, false, undefined, base.parentCardId)
+  }, [activeProfile, card, pending, runCard, saveCard, t])
 
   const closeCard = useCallback(async () => {
     await saveCard()
     setCard(null)
+    setCardStack([])
+  }, [saveCard])
+
+  /** 回到第 index 个祖先：当前卡先落账，再把它上面的层丢掉。 */
+  const popTo = useCallback(
+    async (index: number) => {
+      await saveCard()
+      const ancestor = cardStack[index]
+      if (!ancestor) return
+      setCardStack((prev) => prev.slice(0, index))
+      cardIdRef.current = ancestor.id
+      setCard({ ...ancestor, saved: true })
+    },
+    [cardStack, saveCard],
+  )
+
+  const backToMain = useCallback(async () => {
+    await saveCard()
+    setCard(null)
+    setCardStack([])
   }, [saveCard])
 
   useEffect(() => {
@@ -1187,8 +1226,12 @@ export default function App() {
 
       <CardLayer
         card={card}
+        stack={cardStack}
         profile={activeProfile}
         onClose={() => void closeCard()}
+        onPopTo={(index) => void popTo(index)}
+        onBackToMain={() => void backToMain()}
+        onSelectInCard={handleMouseUp}
         onDepthChange={(level) => {
           if (!card) return
           void runCard(card.anchor, level, card.question, cardIdRef.current ?? card.id, card.sourceText)

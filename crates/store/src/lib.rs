@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use studydeck_core::{
-    Anchor, Card, Course, CourseItem, CourseItemId, CourseItemStatus, Depth, GlossaryEntry,
+    Anchor, Card, CardId, Course, Encounter, CourseItem, CourseItemId, CourseItemStatus, Depth, GlossaryEntry,
     Mastery, Message, MessageStatus, Role, Session, SessionId, SessionSeed, Topic, TopicEdge,
     TopicEdgeId, TopicEdgeKind, TopicNode, TopicNodeId, TopicNodeStatus,
 };
@@ -135,6 +135,19 @@ pub struct MessageHit {
     pub snippet: String,
     pub created_at: DateTime<Utc>,
 }
+
+/// 账本条目 = 概念（去重后的 Entry），附带最近一次遭遇的上下文。
+const ENTRY_SELECT: &str = "SELECT e.id, e.term, e.summary, e.mastery, e.created_at, e.updated_at,
+    (SELECT COUNT(*) FROM encounters c WHERE c.entry_id = e.id) AS encounter_count,
+    (SELECT MAX(c.created_at) FROM encounters c WHERE c.entry_id = e.id) AS last_seen,
+    (SELECT c.level FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_level,
+    (SELECT c.profile_id FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_profile,
+    (SELECT c.message_id FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_message_id,
+    (SELECT c.char_start FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_char_start,
+    (SELECT c.char_end FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_char_end,
+    (SELECT c.quote FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_quote,
+    (SELECT c.session_id FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_session_id
+    FROM entries e";
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -322,6 +335,15 @@ fn migrate(conn: &Connection) -> Result<()> {
             )?;
             Ok(())
         }),
+        (11, |c| {
+            // 卡片栈：记录父卡与深度
+            ensure_column(c, "cards", "parent_card_id", "TEXT")?;
+            ensure_column(c, "cards", "stack_depth", "INTEGER NOT NULL DEFAULT 0")?;
+            c.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_cards_parent ON cards(parent_card_id);",
+            )?;
+            Ok(())
+        }),
         (10, |c| {
             // 卡片模板：记下这张卡/这条账本是在哪套范式、哪一档下得到的
             ensure_column(c, "cards", "profile_id", "TEXT")?;
@@ -330,6 +352,53 @@ fn migrate(conn: &Connection) -> Result<()> {
             ensure_column(c, "glossary", "level", "TEXT")?;
             c.execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_glossary_profile ON glossary(profile_id);",
+            )?;
+            Ok(())
+        }),
+        (12, |c| {
+            c.execute_batch(
+                "CREATE TABLE IF NOT EXISTS entries (
+                    id         TEXT PRIMARY KEY,
+                    term_key   TEXT NOT NULL UNIQUE,
+                    term       TEXT NOT NULL,
+                    summary    TEXT NOT NULL DEFAULT '',
+                    mastery    TEXT NOT NULL DEFAULT 'unknown',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS encounters (
+                    id             TEXT PRIMARY KEY,
+                    entry_id       TEXT NOT NULL,
+                    gist           TEXT NOT NULL,
+                    profile_id     TEXT,
+                    level          TEXT,
+                    message_id     TEXT,
+                    char_start     INTEGER,
+                    char_end       INTEGER,
+                    quote          TEXT,
+                    session_id     TEXT,
+                    parent_card_id TEXT,
+                    created_at     TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_encounters_entry ON encounters(entry_id);",
+            )?;
+            // 老账本 → Entry + 1 个 Encounter（按 term 归一合并）
+            c.execute_batch(
+                "INSERT OR IGNORE INTO entries (id, term_key, term, summary, mastery, created_at, updated_at)
+                 SELECT 'e_' || lower(trim(term)),
+                        lower(trim(term)),
+                        trim(term),
+                        (SELECT gist FROM glossary g2 WHERE lower(trim(g2.term)) = lower(trim(g.term)) ORDER BY g2.rowid DESC LIMIT 1),
+                        (SELECT COALESCE(mastery, 'unknown') FROM glossary g2 WHERE lower(trim(g2.term)) = lower(trim(g.term)) ORDER BY g2.rowid DESC LIMIT 1),
+                        MIN(created_at),
+                        MAX(created_at)
+                 FROM glossary g
+                 WHERE trim(term) <> ''
+                 GROUP BY lower(trim(term));
+                 INSERT OR IGNORE INTO encounters (id, entry_id, gist, profile_id, level, message_id, char_start, char_end, quote, session_id, created_at)
+                 SELECT 'x_' || id, 'e_' || lower(trim(term)), gist, profile_id, level, message_id, char_start, char_end, quote, session_id, created_at
+                 FROM glossary
+                 WHERE trim(term) <> '';",
             )?;
             Ok(())
         }),
@@ -744,8 +813,8 @@ impl Store {
 
     pub fn add_card(&self, card: &Card) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO cards (id, session_id, message_id, char_start, char_end, quote, depth, question, answer, created_at, profile_id, level)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO cards (id, session_id, message_id, char_start, char_end, quote, depth, question, answer, created_at, profile_id, level, parent_card_id, stack_depth)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 card.id.as_str(),
                 card.session_id.as_str(),
@@ -758,7 +827,9 @@ impl Store {
                 card.answer,
                 card.created_at.to_rfc3339(),
                 card.profile_id,
-                card.level
+                card.level,
+                card.parent_card_id.as_ref().map(|id| id.to_string()),
+                card.stack_depth as i64
             ],
         )?;
         Ok(())
@@ -772,68 +843,132 @@ impl Store {
         Ok(())
     }
 
+    pub fn card_by_id(&self, id: &str) -> Result<Option<Card>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT id, session_id, message_id, char_start, char_end, quote, depth, question,
+                        answer, created_at, promoted_session_id, profile_id, level, parent_card_id, stack_depth
+                 FROM cards WHERE id = ?1",
+                params![id],
+                map_card,
+            )
+            .optional()?)
+    }
+
     pub fn cards(&self, session_id: &str) -> Result<Vec<Card>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT id, session_id, message_id, char_start, char_end, quote, depth, question, answer,
                     created_at, promoted_session_id
-             , profile_id, level
+             , profile_id, level, parent_card_id, stack_depth
              FROM cards WHERE session_id = ?1 ORDER BY rowid ASC",
         )?;
         let rows = stmt.query_map(params![session_id], map_card)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    // ---------- glossary ----------
+    // ---------- 账本：Entry（概念）× Encounter（每次遇到） ----------
 
-    pub fn insert_entry(&self, entry: &GlossaryEntry) -> Result<()> {
-        let anchor = entry.source_anchor.clone();
-        self.conn().execute(
-            "INSERT INTO glossary (id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id, updated_at, profile_id, level)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+    fn key_of(term: &str) -> String {
+        term.trim().to_lowercase()
+    }
+
+    /// 记一次「遇到」：同一个词只会有一个 Entry，每次展开都是它的一个 Encounter。
+    pub fn record_encounter(
+        &self,
+        term: &str,
+        gist: &str,
+        profile_id: Option<&str>,
+        level: Option<&str>,
+        anchor: Option<&Anchor>,
+        session_id: Option<&SessionId>,
+        parent_card_id: Option<&str>,
+    ) -> Result<()> {
+        let key = Self::key_of(term);
+        if key.is_empty() {
+            return Ok(());
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+
+        let entry_id: String = match tx
+            .query_row("SELECT id FROM entries WHERE term_key = ?1", params![key], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()?
+        {
+            Some(id) => {
+                tx.execute(
+                    "UPDATE entries SET summary = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id, gist, now],
+                )?;
+                id
+            }
+            None => {
+                let id = format!("e_{}", uuid::Uuid::new_v4().simple());
+                tx.execute(
+                    "INSERT INTO entries (id, term_key, term, summary, mastery, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, 'unknown', ?5, ?5)",
+                    params![id, key, term.trim(), gist, now],
+                )?;
+                id
+            }
+        };
+
+        tx.execute(
+            "INSERT INTO encounters (id, entry_id, gist, profile_id, level, message_id, char_start, char_end, quote, session_id, parent_card_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
-                entry.id.as_str(),
-                entry.term,
-                entry.gist,
-                entry.depth.as_str(),
-                anchor.as_ref().map(|a| a.message_id.to_string()),
-                anchor.as_ref().map(|a| a.char_start as i64),
-                anchor.as_ref().map(|a| a.char_end as i64),
-                anchor.as_ref().map(|a| a.quote.clone()),
-                entry.created_at.to_rfc3339(),
-                entry.mastery.as_str(),
-                entry.session_id.as_ref().map(|s| s.to_string()),
-                entry.created_at.to_rfc3339(),
-                entry.profile_id,
-                entry.level
+                uuid::Uuid::new_v4().simple().to_string(),
+                entry_id,
+                gist,
+                profile_id,
+                level,
+                anchor.map(|a| a.message_id.to_string()),
+                anchor.map(|a| a.char_start as i64),
+                anchor.map(|a| a.char_end as i64),
+                anchor.map(|a| a.quote.clone()),
+                session_id.map(|s| s.to_string()),
+                parent_card_id,
+                now
             ],
         )?;
+        tx.commit()?;
         Ok(())
+    }
+
+    /// 兼容老调用：把一条 GlossaryEntry 当成「一次遭遇」写进去。
+    pub fn insert_entry(&self, entry: &GlossaryEntry) -> Result<()> {
+        self.record_encounter(
+            &entry.term,
+            &entry.gist,
+            entry.profile_id.as_deref(),
+            entry.level.as_deref(),
+            entry.source_anchor.as_ref(),
+            entry.session_id.as_ref(),
+            None,
+        )
     }
 
     pub fn update_entry(
         &self,
         id: &str,
         gist: Option<&str>,
-        depth: Option<Depth>,
+        _depth: Option<Depth>,
         mastery: Option<Mastery>,
     ) -> Result<()> {
         let conn = self.conn();
         if let Some(gist) = gist {
             conn.execute(
-                "UPDATE glossary SET gist = ?2, updated_at = ?3 WHERE id = ?1",
+                "UPDATE entries SET summary = ?2, updated_at = ?3 WHERE id = ?1",
                 params![id, gist, Utc::now().to_rfc3339()],
-            )?;
-        }
-        if let Some(depth) = depth {
-            conn.execute(
-                "UPDATE glossary SET depth = ?2, updated_at = ?3 WHERE id = ?1",
-                params![id, depth.as_str(), Utc::now().to_rfc3339()],
             )?;
         }
         if let Some(mastery) = mastery {
             conn.execute(
-                "UPDATE glossary SET mastery = ?2, updated_at = ?3 WHERE id = ?1",
+                "UPDATE entries SET mastery = ?2, updated_at = ?3 WHERE id = ?1",
                 params![id, mastery.as_str(), Utc::now().to_rfc3339()],
             )?;
         }
@@ -841,76 +976,66 @@ impl Store {
     }
 
     pub fn delete_entry(&self, id: &str) -> Result<()> {
-        self.conn()
-            .execute("DELETE FROM glossary WHERE id = ?1", params![id])?;
+        let conn = self.conn();
+        conn.execute("DELETE FROM encounters WHERE entry_id = ?1", params![id])?;
+        conn.execute("DELETE FROM entries WHERE id = ?1", params![id])?;
         Ok(())
     }
 
-    /// 合并重复条目：把 source 的结论并进 target，再删掉 source。
+    /// 合并：结论并进 target，source 的所有遭遇也归到 target，再删掉 source。
     pub fn merge_entries(&self, target: &str, sources: &[String]) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        let mut gist: String = tx
-            .query_row(
-                "SELECT gist FROM glossary WHERE id = ?1",
-                params![target],
-                |row| row.get(0),
-            )
+        let mut summary: String = tx
+            .query_row("SELECT summary FROM entries WHERE id = ?1", params![target], |row| row.get(0))
             .optional()?
             .unwrap_or_default();
+
         for source in sources {
             if source == target {
                 continue;
             }
-            let extra: Option<String> = tx
-                .query_row(
-                    "SELECT gist FROM glossary WHERE id = ?1",
-                    params![source],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if let Some(extra) = extra {
-                if !extra.trim().is_empty() && !gist.contains(extra.trim()) {
-                    gist.push_str(" ｜ ");
-                    gist.push_str(extra.trim());
+            if let Some(extra) = tx
+                .query_row("SELECT summary FROM entries WHERE id = ?1", params![source], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()?
+            {
+                if !extra.trim().is_empty() && !summary.contains(extra.trim()) {
+                    summary.push_str(" ｜ ");
+                    summary.push_str(extra.trim());
                 }
             }
-            tx.execute("DELETE FROM glossary WHERE id = ?1", params![source])?;
+            tx.execute("UPDATE encounters SET entry_id = ?2 WHERE entry_id = ?1", params![source, target])?;
+            tx.execute("DELETE FROM entries WHERE id = ?1", params![source])?;
         }
+
         tx.execute(
-            "UPDATE glossary SET gist = ?2, updated_at = ?3 WHERE id = ?1",
-            params![target, gist, Utc::now().to_rfc3339()],
+            "UPDATE entries SET summary = ?2, updated_at = ?3 WHERE id = ?1",
+            params![target, summary, Utc::now().to_rfc3339()],
         )?;
         tx.commit()?;
         Ok(())
     }
 
-    /// 命中优先：按术语找最近的条目（大小写不敏感，先精确后模糊）。
+    /// 命中优先：按 term_key 精确匹配，再退化为包含匹配。
     pub fn match_entry(&self, term: &str) -> Result<Option<GlossaryEntry>> {
-        let needle = term.trim();
-        if needle.is_empty() {
+        let key = Self::key_of(term);
+        if key.is_empty() {
             return Ok(None);
         }
-        let exact: Option<GlossaryEntry> = self
+        let exact = self
             .conn()
-            .query_row(
-                "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id, profile_id, level
-                 FROM glossary WHERE lower(trim(term)) = lower(trim(?1))
-                 ORDER BY rowid DESC LIMIT 1",
-                params![needle],
-                map_entry,
-            )
+            .query_row(&format!("{ENTRY_SELECT} WHERE e.term_key = ?1 LIMIT 1"), params![key], map_entry)
             .optional()?;
         if exact.is_some() {
             return Ok(exact);
         }
-        let fuzzy: Option<GlossaryEntry> = self
+        let fuzzy = self
             .conn()
             .query_row(
-                "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id, profile_id, level
-                 FROM glossary WHERE lower(term) LIKE lower(?1)
-                 ORDER BY length(term) ASC, rowid DESC LIMIT 1",
-                params![format!("%{}%", needle)],
+                &format!("{ENTRY_SELECT} WHERE lower(e.term) LIKE ?1 ORDER BY length(e.term) ASC, e.updated_at DESC LIMIT 1"),
+                params![format!("%{}%", key)],
                 map_entry,
             )
             .optional()?;
@@ -919,47 +1044,27 @@ impl Store {
 
     pub fn all_entries(&self) -> Result<Vec<GlossaryEntry>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id, profile_id, level
-             FROM glossary ORDER BY rowid DESC",
-        )?;
+        let mut stmt = conn.prepare(&format!("{ENTRY_SELECT} ORDER BY e.updated_at DESC"))?;
         let rows = stmt.query_map([], map_entry)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn search_entries(&self, query: Option<&str>, limit: usize) -> Result<Vec<GlossaryEntry>> {
         let conn = self.conn();
-        let q = query.map(str::trim).filter(|q| !q.is_empty());
-
+        let q = query.map(str::trim).filter(|value| !value.is_empty());
         let mut out = Vec::new();
-        match (q, self.has_fts) {
-            (Some(q), true) => {
-                let mut stmt = conn.prepare(
-                    "SELECT g.id, g.term, g.gist, g.depth, g.message_id, g.char_start, g.char_end, g.quote, g.created_at, g.mastery, g.session_id, g.profile_id, g.level
-                     FROM glossary_fts f JOIN glossary g ON g.rowid = f.rowid
-                     WHERE glossary_fts MATCH ?1 ORDER BY rank LIMIT ?2",
-                )?;
-                let rows = stmt.query_map(params![format!("{}*", q), limit as i64], map_entry)?;
+        match q {
+            Some(q) => {
+                let mut stmt = conn.prepare(&format!(
+                    "{ENTRY_SELECT} WHERE e.term LIKE ?1 OR e.summary LIKE ?1 ORDER BY e.updated_at DESC LIMIT ?2"
+                ))?;
+                let rows = stmt.query_map(params![format!("%{}%", q), limit as i64], map_entry)?;
                 for row in rows {
                     out.push(row?);
                 }
             }
-            (Some(q), false) => {
-                let pattern = format!("%{}%", q);
-                let mut stmt = conn.prepare(
-                    "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id, profile_id, level
-                     FROM glossary WHERE term LIKE ?1 OR gist LIKE ?1 ORDER BY rowid DESC LIMIT ?2",
-                )?;
-                let rows = stmt.query_map(params![pattern, limit as i64], map_entry)?;
-                for row in rows {
-                    out.push(row?);
-                }
-            }
-            _ => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, term, gist, depth, message_id, char_start, char_end, quote, created_at, mastery, session_id, profile_id, level
-                     FROM glossary ORDER BY rowid DESC LIMIT ?1",
-                )?;
+            None => {
+                let mut stmt = conn.prepare(&format!("{ENTRY_SELECT} ORDER BY e.updated_at DESC LIMIT ?1"))?;
                 let rows = stmt.query_map(params![limit as i64], map_entry)?;
                 for row in rows {
                     out.push(row?);
@@ -967,6 +1072,28 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// 一条概念的全部「遇到」记录（时间线 / 路径）。
+    pub fn entry_encounters(&self, entry_id: &str) -> Result<Vec<Encounter>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, entry_id, gist, profile_id, level, session_id, parent_card_id, created_at
+             FROM encounters WHERE entry_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![entry_id], |row| {
+            Ok(Encounter {
+                id: row.get(0)?,
+                entry_id: row.get::<_, String>(1)?.into(),
+                gist: row.get(2)?,
+                profile_id: row.get(3)?,
+                level: row.get(4)?,
+                session_id: row.get::<_, Option<String>>(5)?.map(SessionId::from),
+                parent_card_id: row.get(6)?,
+                created_at: parse_dt(&row.get::<_, String>(7)?),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     // ---------- 专题 / 升级 ----------
@@ -2090,6 +2217,12 @@ fn map_card(row: &Row<'_>) -> rusqlite::Result<Card> {
         promoted_session_id: row.get::<_, Option<String>>(10)?.map(SessionId::from),
         profile_id: row.get::<_, Option<String>>("profile_id").ok().flatten(),
         level: row.get::<_, Option<String>>("level").ok().flatten(),
+        parent_card_id: row
+            .get::<_, Option<String>>("parent_card_id")
+            .ok()
+            .flatten()
+            .map(CardId::from),
+        stack_depth: row.get::<_, Option<i64>>("stack_depth").ok().flatten().unwrap_or(0) as u32,
     })
 }
 
@@ -2198,29 +2331,40 @@ fn summarize(text: &str) -> String {
 }
 
 fn map_entry(row: &Row<'_>) -> rusqlite::Result<GlossaryEntry> {
-    let message_id: Option<String> = row.get(4)?;
+    let message_id: Option<String> = row.get::<_, Option<String>>("last_message_id").ok().flatten();
     let anchor = message_id.map(|id| Anchor {
         message_id: id.into(),
-        char_start: row.get::<_, Option<i64>>(5).ok().flatten().unwrap_or(0) as usize,
-        char_end: row.get::<_, Option<i64>>(6).ok().flatten().unwrap_or(0) as usize,
-        quote: row
-            .get::<_, Option<String>>(7)
-            .ok()
-            .flatten()
-            .unwrap_or_default(),
+        char_start: row.get::<_, Option<i64>>("last_char_start").ok().flatten().unwrap_or(0) as usize,
+        char_end: row.get::<_, Option<i64>>("last_char_end").ok().flatten().unwrap_or(0) as usize,
+        quote: row.get::<_, Option<String>>("last_quote").ok().flatten().unwrap_or_default(),
     });
+    let level: Option<String> = row.get::<_, Option<String>>("last_level").ok().flatten();
     Ok(GlossaryEntry {
         id: row.get::<_, String>(0)?.into(),
         term: row.get(1)?,
         gist: row.get(2)?,
-        depth: Depth::parse(&row.get::<_, String>(3)?).unwrap_or_default(),
-        profile_id: row.get::<_, Option<String>>("profile_id").ok().flatten(),
-        level: row.get::<_, Option<String>>("level").ok().flatten(),
-        mastery: Mastery::parse(&row.get::<_, String>(9)?).unwrap_or_default(),
+        depth: Depth::parse(level.as_deref().unwrap_or("can_tune")).unwrap_or_default(),
+        profile_id: row.get::<_, Option<String>>("last_profile").ok().flatten(),
+        level,
+        mastery: Mastery::parse(&row.get::<_, String>(3)?).unwrap_or_default(),
         source_anchor: anchor,
-        session_id: row.get::<_, Option<String>>(10)?.map(SessionId::from),
-        created_at: parse_dt(&row.get::<_, String>(8)?),
-        updated_at: None,
+        session_id: row
+            .get::<_, Option<String>>("last_session_id")
+            .ok()
+            .flatten()
+            .map(SessionId::from),
+        created_at: parse_dt(&row.get::<_, String>(4)?),
+        updated_at: row
+            .get::<_, Option<String>>(5)
+            .ok()
+            .flatten()
+            .map(|value| parse_dt(&value)),
+        encounter_count: row.get::<_, i64>("encounter_count").unwrap_or(0) as u32,
+        last_seen: row
+            .get::<_, Option<String>>("last_seen")
+            .ok()
+            .flatten()
+            .map(|value| parse_dt(&value)),
     })
 }
 
@@ -2233,7 +2377,7 @@ fn parse_dt(value: &str) -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use studydeck_core::{Anchor, Card, CardId, Course, CourseItemStatus, Depth, Message, Topic};
+    use studydeck_core::{Anchor, Card, CardId, Course, Encounter, CourseItemStatus, Depth, Message, Topic};
 
     #[test]
     fn promote_card_creates_topic_and_is_idempotent() {

@@ -2,12 +2,14 @@ import { useMemo, useState } from 'react'
 import { useI18n } from '../lib/i18n'
 import {
   deleteEntry,
+  fetchEntryDetail,
   mergeEntries,
   updateEntry,
 } from '../lib/api'
 import {
   DEPTH_LABEL,
   MASTERY_LABEL,
+  type Encounter,
   type GlossaryEntry,
   type Mastery,
   type MessageHit,
@@ -39,6 +41,24 @@ export function GlossaryPanel(props: Props) {
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [confirming, setConfirming] = useState<string | null>(null)
+  const [openTimeline, setOpenTimeline] = useState<string | null>(null)
+  const [timelines, setTimelines] = useState<Record<string, Encounter[]>>({})
+
+  const toggleTimeline = async (entry: GlossaryEntry) => {
+    if (openTimeline === entry.id) {
+      setOpenTimeline(null)
+      return
+    }
+    setOpenTimeline(entry.id)
+    if (!timelines[entry.id]) {
+      try {
+        const detail = await fetchEntryDetail(entry.id)
+        setTimelines((prev) => ({ ...prev, [entry.id]: detail.encounters }))
+      } catch {
+        // 拉不到时间线不影响列表
+      }
+    }
+  }
 
   // 同名（忽略大小写）出现多条 → 可以合并
   const duplicates = useMemo(() => {
@@ -123,6 +143,15 @@ export function GlossaryPanel(props: Props) {
                     >
                       {MASTERY_LABEL[entry.mastery]}
                     </button>
+                    {(entry.encounter_count ?? 0) > 1 && (
+                      <button
+                        className="badge encounters"
+                        title={t('遇到过 {n} 次', { n: entry.encounter_count ?? 0 })}
+                        onClick={() => void toggleTimeline(entry)}
+                      >
+                        ×{entry.encounter_count}
+                      </button>
+                    )}
                   </div>
 
                   {editing === entry.id ? (
@@ -139,6 +168,23 @@ export function GlossaryPanel(props: Props) {
                     </div>
                   ) : (
                     <p className="gist">{entry.gist}</p>
+                  )}
+
+                  {openTimeline === entry.id && (
+                    <div className="encounter-timeline">
+                      {(timelines[entry.id] ?? []).map((hit) => (
+                        <div key={hit.id} className="encounter">
+                          <span className="encounter-time">
+                            {hit.created_at.slice(5, 16).replace('T', ' ')}
+                          </span>
+                          <span className="encounter-level">{hit.level ?? ''}</span>
+                          <span className="encounter-gist">{hit.gist.slice(0, 80)}</span>
+                        </div>
+                      ))}
+                      {(timelines[entry.id] ?? []).length === 0 && (
+                        <p className="muted small">没有更早的记录。</p>
+                      )}
+                    </div>
                   )}
 
                   <div className="entry-actions">

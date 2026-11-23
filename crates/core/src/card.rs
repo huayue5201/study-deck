@@ -82,5 +82,11 @@ pub struct Card {
     /// 这张卡片升级成的专题会话；None 表示还没升级。
     #[serde(default)]
     pub promoted_session_id: Option<SessionId>,
+    /// 这张卡是在哪张卡的文字上展开的；None = 直接从主线消息展开。
+    #[serde(default)]
+    pub parent_card_id: Option<CardId>,
+    /// 栈深：从主线展开的卡 = 0。
+    #[serde(default)]
+    pub stack_depth: u32,
     pub created_at: DateTime<Utc>,
 }

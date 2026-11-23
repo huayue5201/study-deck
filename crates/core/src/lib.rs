@@ -18,7 +18,7 @@ pub use card::{Card, Depth};
 pub use context::{Block, BlockRole, ContextAssembler, Mode, TurnRequest};
 pub use course::{Course, CourseItem, CourseItemStatus};
 pub use event::{AgentEvent, Usage};
-pub use glossary::{GlossaryEntry, Mastery};
+pub use glossary::{Encounter, GlossaryEntry, Mastery};
 pub use ids::{
     CardId, CourseId, CourseItemId, EntryId, MessageId, SessionId, TopicEdgeId, TopicId,
     TopicNodeId,

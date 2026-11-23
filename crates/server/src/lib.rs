@@ -269,6 +269,7 @@ pub async fn run_with_ready(
         .route("/api/turns/{id}/cancel", post(cancel_turn))
         .route("/api/glossary", get(list_glossary).post(add_glossary))
         .route("/api/glossary/match", get(match_glossary))
+        .route("/api/entries/{id}", get(entry_detail))
         .route("/api/glossary/merge", post(merge_glossary))
         .route(
             "/api/glossary/{id}",
@@ -1598,6 +1599,8 @@ struct TurnSpec {
     profile_id: Option<String>,
     /// 用户选的档位 id
     level: Option<String>,
+    /// 嵌套展开：父卡 id
+    nest_from: Option<String>,
 }
 
 struct StartedTurn {
@@ -1704,6 +1707,12 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
         Mode::Main => (None, None),
     };
 
+    // 嵌套展开的父卡（在主线上展开时为 None）
+    let nest_parent = spec
+        .nest_from
+        .as_ref()
+        .and_then(|id| state.store.card_by_id(id).ok().flatten());
+
     let (assistant_id, card_id) = match spec.mode {
         Mode::Main => {
             let mut user = Message::user(&spec.session_id, spec.text.clone());
@@ -1737,6 +1746,10 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
                     spec.text.clone(),
                 )
             });
+            let stack_depth = nest_parent
+                .as_ref()
+                .map(|card| card.stack_depth + 1)
+                .unwrap_or(0);
             let card = Card {
                 id: CardId::new(),
                 session_id: spec.session_id.clone(),
@@ -1744,6 +1757,8 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
                 depth: spec.depth.unwrap_or_default(),
                 profile_id: resolved_profile.as_ref().map(|profile| profile.id.clone()),
                 level: resolved_level.clone(),
+                parent_card_id: nest_parent.as_ref().map(|card| card.id.clone()),
+                stack_depth,
                 question: spec.text.clone(),
                 answer: String::new(),
                 promoted_session_id: None,
@@ -1779,7 +1794,7 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
         text: spec.text.clone(),
         anchor: spec.anchor.clone(),
         depth: spec.depth,
-        parent_card,
+        parent_card: nest_parent.or(parent_card),
         card_history: spec.card_history,
         topic,
         seed,
@@ -1997,6 +2012,8 @@ struct ChatBody {
     profile_id: Option<String>,
     /// 档位 id（不传 = 模板默认档）
     level: Option<String>,
+    /// 在哪张卡的文字上展开（嵌套）；不传 = 从主线消息展开
+    parent_card_id: Option<String>,
     /// 回答语言（zh/en）
     locale: Option<String>,
 }
@@ -2029,6 +2046,7 @@ async fn chat(State(state): State<Arc<AppState>>, Json(body): Json<ChatBody>) ->
         project_root: None,
         profile_id: body.profile_id,
         level: body.level,
+        nest_from: body.parent_card_id,
         locale: body.locale,
     };
     match begin_turn(&state, spec) {
@@ -2122,6 +2140,7 @@ async fn ask(State(state): State<Arc<AppState>>, Json(body): Json<AskBody>) -> R
         },
         profile_id: None,
         level: None,
+        nest_from: None,
         locale: None,
     };
     match begin_turn(&state, spec) {
@@ -2243,31 +2262,28 @@ struct GlossaryBody {
     mastery: Option<String>,
     profile_id: Option<String>,
     level: Option<String>,
+    /// 若是在某张卡上展开的，记下父卡
+    parent_card_id: Option<String>,
 }
 
 async fn add_glossary(
     State(state): State<Arc<AppState>>,
     Json(body): Json<GlossaryBody>,
 ) -> impl IntoResponse {
-    let mut entry = GlossaryEntry::new(
-        body.term,
-        body.gist,
-        body.depth
-            .as_deref()
-            .and_then(Depth::parse)
-            .unwrap_or_default(),
-        body.anchor,
-    );
-    entry.session_id = body.session_id.map(SessionId::from);
-    entry.profile_id = body.profile_id;
-    entry.level = body.level;
-    entry.mastery = body
-        .mastery
-        .as_deref()
-        .and_then(Mastery::parse)
-        .unwrap_or_default();
-    match state.store.insert_entry(&entry) {
-        Ok(()) => (StatusCode::CREATED, Json(json!(entry))).into_response(),
+    let session_id = body.session_id.map(SessionId::from);
+    match state.store.record_encounter(
+        &body.term,
+        &body.gist,
+        body.profile_id.as_deref(),
+        body.level.as_deref(),
+        body.anchor.as_ref(),
+        session_id.as_ref(),
+        body.parent_card_id.as_deref(),
+    ) {
+        Ok(()) => match state.store.match_entry(&body.term).ok().flatten() {
+            Some(entry) => (StatusCode::CREATED, Json(json!(entry))).into_response(),
+            None => (StatusCode::CREATED, Json(json!({ "ok": true }))).into_response(),
+        },
         Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
@@ -2557,6 +2573,23 @@ async fn set_active_profile(
     match state.profiles.set_active(&body.id) {
         Ok(()) => Json(json!({ "active": body.id })).into_response(),
         Err(err) => api_error(StatusCode::NOT_FOUND, err.to_string()),
+    }
+}
+
+async fn entry_detail(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let entry = match state.store.all_entries() {
+        Ok(entries) => entries.into_iter().find(|entry| entry.id.as_str() == id),
+        Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    let Some(entry) = entry else {
+        return api_error(StatusCode::NOT_FOUND, "entry not found");
+    };
+    match state.store.entry_encounters(&id) {
+        Ok(encounters) => Json(json!({ "entry": entry, "encounters": encounters })).into_response(),
+        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
 

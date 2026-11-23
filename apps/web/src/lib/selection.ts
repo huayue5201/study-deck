@@ -4,12 +4,16 @@ export interface SelectionInfo {
   anchor: Anchor
   rect: DOMRect
   sourceText: string
+  /** 选区落在某张卡片里时，带上它的 id（用于嵌套展开） */
+  cardId?: string
 }
 
 function closestMessage(node: Node): HTMLElement | null {
   let current: Node | null = node.nodeType === Node.ELEMENT_NODE ? node : node.parentNode
   while (current && current !== document.body) {
-    if (current instanceof HTMLElement && current.dataset.messageId) return current
+    if (current instanceof HTMLElement && (current.dataset.messageId || current.dataset.cardId)) {
+      return current
+    }
     current = current.parentNode
   }
   return null
@@ -49,7 +53,8 @@ export function readAnchor(): SelectionInfo | null {
   const root = closestMessage(range.commonAncestorContainer)
   if (!root) return null
 
-  const messageId = root.dataset.messageId
+  const cardId = root.dataset.cardId
+  const messageId = root.dataset.messageId ?? (cardId ? `card:${cardId}` : undefined)
   if (!messageId) return null
 
   const start = charOffset(root, range.startContainer, range.startOffset)
@@ -65,5 +70,6 @@ export function readAnchor(): SelectionInfo | null {
     },
     rect: range.getBoundingClientRect(),
     sourceText: root.textContent ?? '',
+    cardId,
   }
 }

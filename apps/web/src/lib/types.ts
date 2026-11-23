@@ -160,6 +160,19 @@ export interface GlossaryEntry {
   session_id: string | null
   created_at: string
   updated_at?: string | null
+  encounter_count?: number
+  last_seen?: string | null
+}
+
+export interface Encounter {
+  id: string
+  entry_id: string
+  gist: string
+  profile_id: string | null
+  level: string | null
+  session_id: string | null
+  parent_card_id: string | null
+  created_at: string
 }
 
 export interface MessageHit {
@@ -198,6 +211,8 @@ export interface ChatBody {
   card_history?: string
   /** 回答语言：跟随界面 */
   locale?: string
+  /** 在上一张卡上展开 */
+  parent_card_id?: string
 }
 
 export interface Health {

@@ -10,6 +10,7 @@ import type {
   CardProfile,
   ChatBody,
   Depth,
+  Encounter,
   GlossaryEntry,
   Health,
   Mastery,
@@ -168,6 +169,7 @@ export async function saveGlossary(input: {
   /** 任意档位 id：账本按模板隔离，避免跨范式串味 */
   profile_id?: string
   level?: string
+  parent_card_id?: string
 }): Promise<GlossaryEntry> {
   return readJson<GlossaryEntry>(
     await api('/api/glossary', {
@@ -611,5 +613,13 @@ export async function updateTopicNode(
 export async function deleteTopicNode(topicId: string, nodeId: string): Promise<void> {
   await readJson<{ ok: boolean }>(
     await api(`/api/topics/${topicId}/nodes/${nodeId}`, { method: 'DELETE' }),
+  )
+}
+
+export async function fetchEntryDetail(
+  id: string,
+): Promise<{ entry: GlossaryEntry; encounters: Encounter[] }> {
+  return readJson<{ entry: GlossaryEntry; encounters: Encounter[] }>(
+    await api(`/api/entries/${id}`),
   )
 }

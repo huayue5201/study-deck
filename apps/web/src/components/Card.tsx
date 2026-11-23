@@ -13,14 +13,23 @@ export interface OpenCardState {
   streaming: boolean
   saved: boolean
   promotedSessionId: string | null
+  /** 嵌套展开时的父卡 id */
+  parentCardId: string | null
   rect: { left: number; top: number; width: number; height: number }
   sourceText: string
 }
 
 interface Props {
   card: OpenCardState
+  /** 祖先卡片（栈底在前），用于扇形叠放与面包屑 */
+  stack: OpenCardState[]
   profile: CardProfile
   onClose: () => void
+  /** 回到第 index 个祖先（0 = 最外层） */
+  onPopTo: (index: number) => void
+  onBackToMain: () => void
+  /** 在卡片正文里划词，准备嵌套展开 */
+  onSelectInCard: () => void
   onDepthChange: (level: string) => void
   onFollowUp: (text: string) => void
   onSave: () => void
@@ -48,8 +57,12 @@ function clampToViewport(
 
 export function Card({
   card,
+  stack,
   profile,
   onClose,
+  onPopTo,
+  onBackToMain,
+  onSelectInCard,
   onDepthChange,
   onFollowUp,
   onSave,
@@ -170,14 +183,45 @@ export function Card({
     }
   }
 
+  const depth = stack.length + 1
+  const visiblePeeks = stack.slice(-3).map((ancestor, index) => ({
+    ancestor,
+    index: stack.length - Math.min(stack.length, 3) + index,
+    offset: 3 - Math.min(stack.length, 3) + index + 1,
+  }))
+  const hiddenAbove = Math.max(0, stack.length - 3)
+
   return (
     <div
-      className="card"
-      ref={ref}
+      className="card-stack"
       style={pos ? { left: pos.left, top: pos.top } : { visibility: 'hidden' }}
-      onMouseUp={(event) => event.stopPropagation()}
       onWheel={(event) => event.stopPropagation()}
     >
+      {visiblePeeks.map(({ ancestor, index, offset }) => (
+        <button
+          key={`${ancestor.id ?? ancestor.anchor.quote}-${index}`}
+          className="card-peek"
+          style={{
+            transform: `translateY(${-offset * 11}px) rotate(${-offset * 1.6}deg)`,
+            opacity: 0.35 + offset * 0.12,
+            zIndex: 10 - offset,
+          }}
+          onClick={() => onPopTo(index)}
+          title={t('回到：{text}', { text: ancestor.anchor.quote.slice(0, 40) })}
+        >
+          {hiddenAbove > 0 && offset === 3 && <span className="peek-more">+{hiddenAbove}</span>}
+          {ancestor.anchor.quote.slice(0, 16)}
+        </button>
+      ))}
+
+      <div
+        className="card"
+        ref={ref}
+        onMouseUp={(event) => {
+          event.stopPropagation()
+          onSelectInCard()
+        }}
+      >
       <header
         className="card-head"
         onPointerDown={startDrag}
@@ -189,14 +233,33 @@ export function Card({
         <div className="card-term" title={card.anchor.quote}>
           {card.anchor.quote.slice(0, 60)}
         </div>
-        <button className="icon" onClick={onClose} title={t('关闭（Esc）')}>
+        <span className="card-depth-badge">{t('第 {n} 层', { n: depth })}</span>
+        <button className="icon" onClick={onClose} title={t('关闭整叠（Esc）')}>
           ×
         </button>
       </header>
 
-      <div className="card-breadcrumb" title={card.sourceText}>
-        {t('来自：{text}', { text: card.sourceText.replace(/\s+/g, ' ').slice(0, 40) || '主线对话' })}
+      <div className="card-breadcrumb">
+        <button className="crumb" onClick={onBackToMain}>
+          {t('主线')}
+        </button>
+        {stack.map((ancestor, index) => (
+          <span key={`${ancestor.id ?? index}`} className="crumb-wrap">
+            <span className="crumb-sep">›</span>
+            <button className="crumb" onClick={() => onPopTo(index)}>
+              {ancestor.anchor.quote.slice(0, 14)}
+            </button>
+          </span>
+        ))}
+        <span className="crumb-sep">›</span>
+        <span className="crumb current">{card.anchor.quote.slice(0, 14)}</span>
       </div>
+
+      {depth >= 5 && (
+        <div className="card-warning">
+          {t('已深入 {n} 层，注意上下文与成本', { n: depth })}
+        </div>
+      )}
 
       {longList ? (
         <div className="card-depth long">
@@ -232,6 +295,7 @@ export function Card({
 
       <div
         className="card-body"
+        data-card-id={card.id ?? undefined}
         dangerouslySetInnerHTML={{ __html: renderMarkdown(card.answer || (card.streaming ? '…' : '')) }}
       />
 
@@ -280,6 +344,7 @@ export function Card({
           )}
         </div>
       </footer>
+      </div>
     </div>
   )
 }
