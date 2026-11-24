@@ -39,6 +39,7 @@ import {
 import { useI18n } from './lib/i18n'
 import { isImeComposing } from './lib/ime'
 import { readAnchor } from './lib/selection'
+import { stripMarkdown } from './lib/markdown'
 import {
   FALLBACK_PROFILE,
   MASTERY_LABEL,
@@ -120,13 +121,6 @@ function sameMessages(a: Message[], b: Message[]): boolean {
       message.text === b[index].text &&
       message.status === b[index].status,
   )
-}
-
-function stripMarkdown(text: string): string {
-  return text
-    .replace(/[#>*`_\-]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
 }
 
 /** 卡片档位是用户自定义的；账本仍按三档 Depth 记账，这里做一次映射。 */
@@ -233,6 +227,14 @@ export default function App() {
   }, [cards, chain])
 
   // 同一处划词的其它根卡（第 1 层的「分支」没有父节点可挂，单独列出来）
+  const treeCards = useMemo(() => Object.values(cards), [cards])
+  const hasFork = useMemo(() => {
+    const counts = new Map<string | null, number>()
+    for (const node of treeCards) {
+      counts.set(node.parentLocalId, (counts.get(node.parentLocalId) ?? 0) + 1)
+    }
+    return [...counts.values()].some((count) => count > 1)
+  }, [treeCards])
   const rootBranches = useMemo(
     () =>
       Object.values(cards).filter(
@@ -1246,7 +1248,7 @@ export default function App() {
     t('未命名')
 
   return (
-    <div className={`app${docked ? ' with-dock' : ''}`}>
+    <div className={`app${docked ? ' with-dock' : ''}${docked && hasFork ? ' with-tree' : ''}`}>
       {sidebarOpen && (
         <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
       )}
@@ -1483,7 +1485,8 @@ export default function App() {
         chain={chain}
         activeIndex={activeIndex}
         branchLists={branchLists}
-        rootBranches={rootBranches}
+        treeCards={treeCards}
+        onFocusNode={focusOn}
         docked={docked}
         profile={activeProfile}
         onClose={() => void closeCard()}

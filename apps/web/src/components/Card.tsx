@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { renderMarkdown } from '../lib/markdown'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { renderMarkdown, stripMarkdown } from '../lib/markdown'
 import { useI18n } from '../lib/i18n'
 import { isImeComposing } from '../lib/ime'
 import type { Anchor, CardProfile } from '../lib/types'
@@ -32,13 +32,14 @@ export interface CardProps {
   activeIndex: number
   /** 每一层「往下走」的其它选择（= 分支），与 chain 同下标 */
   branchLists: OpenCardState[][]
-  /** 同一处划词的其它根卡（第 1 层的平行分支） */
-  rootBranches: OpenCardState[]
+  /** 整棵树的所有节点（dock 大纲用） */
+  treeCards: OpenCardState[]
   profile: CardProfile
   onClose: () => void
   /** 跳到链上第 index 层 */
   onJump: (index: number) => void
   /** 切到某个祖先下的另一条分支（直接给目标节点的 localId） */
+  onFocusNode: (localId: string) => void
   onSwitchBranch: (parentIndex: number, targetLocalId: string) => void
   /** 在同一处内容上再问一个：新开一条兄弟分支 */
   onBranch: (text: string) => void
@@ -78,10 +79,11 @@ export function Card({
   chain,
   activeIndex,
   branchLists,
-  rootBranches,
+  treeCards,
   profile,
   onClose,
   onJump,
+  onFocusNode,
   onSwitchBranch,
   onBranch,
   docked,
@@ -350,6 +352,91 @@ export function Card({
   const cardWidth = Math.min(510, viewport.w - 16)
 
   // 入场动画从「被划的那段文字」位置长出来
+  const defaultQuestion = t('请解释这段内容。')
+  /** 分支标签：优先用「这一支在问什么」，默认问题或空则退回引文 */
+  const labelBase = (node: OpenCardState) => {
+    const question = (node.question ?? '').trim()
+    const text =
+      question && question !== defaultQuestion
+        ? question
+        : node.anchor.quote.replace(/\s+/g, ' ').trim()
+    return text.length > 20 ? `${text.slice(0, 20)}…` : text
+  }
+  /** 同一个词分出的多支，标签会撞车：给它们编号 1/2、2/2 */
+  const labelInfo = useMemo(() => {
+    const total = new Map<string, number>()
+    const ordinal = new Map<string, number>()
+    for (const node of treeCards) {
+      const base = labelBase(node)
+      ordinal.set(node.localId, (total.get(base) ?? 0) + 1)
+      total.set(base, (total.get(base) ?? 0) + 1)
+    }
+    return { total, ordinal }
+  }, [treeCards])
+  const labelOf = (node: OpenCardState) => {
+    const base = labelBase(node)
+    const count = labelInfo.total.get(base) ?? 1
+    return count > 1 ? `${base} ${labelInfo.ordinal.get(node.localId)}/${count}` : base
+  }
+  const gistOf = (node: OpenCardState) =>
+    stripMarkdown(node.answer).replace(/\s+/g, ' ').trim().slice(0, 64)
+
+  const childrenOf = useMemo(() => {
+    const map = new Map<string | null, OpenCardState[]>()
+    for (const node of treeCards) {
+      const list = map.get(node.parentLocalId) ?? []
+      list.push(node)
+      map.set(node.parentLocalId, list)
+    }
+    return map
+  }, [treeCards])
+  const roots = childrenOf.get(null) ?? []
+  const hasFork = useMemo(
+    () => [...childrenOf.values()].some((list) => list.length > 1),
+    [childrenOf],
+  )
+  const treeRows = useMemo(() => {
+    const rows: Array<{ node: OpenCardState; depth: number }> = []
+    const walk = (parent: string | null, depth: number) => {
+      for (const node of childrenOf.get(parent) ?? []) {
+        rows.push({ node, depth })
+        walk(node.localId, depth + 1)
+      }
+    }
+    walk(null, 0)
+    return rows
+  }, [childrenOf])
+
+  /** 面包屑上的分叉弹层：root = 主线下的平行根卡，level = 某层下的其它分支 */
+  const [pop, setPop] = useState<{ key: 'root' } | { key: 'level'; index: number } | null>(null)
+  const [popCursor, setPopCursor] = useState(0)
+  const popRef = useRef<HTMLDivElement | null>(null)
+  const popRows = useMemo(() => {
+    if (!pop) return [] as OpenCardState[]
+    if (pop.key === 'root') return roots
+    const index = pop.index
+    const next = chain[index + 1]
+    return [...(next ? [next] : []), ...(branchLists[index] ?? [])]
+  }, [pop, roots, chain, branchLists])
+
+  useEffect(() => {
+    if (!pop) return
+    setPopCursor(0)
+    const onDown = (event: PointerEvent) => {
+      if (!popRef.current?.contains(event.target as Node)) setPop(null)
+    }
+    document.addEventListener('pointerdown', onDown, true)
+    return () => document.removeEventListener('pointerdown', onDown, true)
+  }, [pop])
+
+  const choosePop = (node: OpenCardState) => {
+    if (pop) {
+      if (pop.key === 'root') onSwitchBranch(-1, node.localId)
+      else onSwitchBranch(pop.index, node.localId)
+    }
+    setPop(null)
+  }
+
   const enterOrigin = pos
     ? `${Math.max(0, Math.min(card.rect.left + card.rect.width / 2 - pos.left, cardWidth))}px ${
         Math.max(-40, Math.min(card.rect.top - pos.top, 420))
@@ -359,7 +446,7 @@ export function Card({
   return (
     <div
       ref={stackRef}
-      className={`card-stack${docked ? ' docked' : ''}${closing ? ' closing' : ''}`}
+      className={`card-stack${docked ? ' docked' : ''}${docked && hasFork ? ' with-tree' : ''}${closing ? ' closing' : ''}`}
       style={
         docked
           ? undefined
@@ -369,6 +456,26 @@ export function Card({
       }
       onWheel={(event) => event.stopPropagation()}
     >
+      {docked && hasFork && (
+        <aside className="card-tree" aria-label={t('卡片树')}>
+          <div className="card-tree-head">{t('卡片树')} · {treeRows.length}</div>
+          {treeRows.map(({ node, depth }) => (
+            <button
+              key={node.localId}
+              className={`tree-node${node.localId === card.localId ? ' current' : ''}${
+                node.streaming ? ' streaming' : ''
+              }`}
+              style={{ paddingLeft: 8 + depth * 12 }}
+              onClick={() => onFocusNode(node.localId)}
+              title={node.anchor.quote}
+            >
+              <span className="tree-dot" />
+              <span className="tree-label">{labelOf(node)}</span>
+            </button>
+          ))}
+        </aside>
+      )}
+
       <div
         className="card"
         ref={ref}
@@ -428,39 +535,45 @@ export function Card({
         <button className="crumb home" onClick={onBackToMain}>
           {t('主线')}
         </button>
-        {rootBranches.map((sib) => (
+        {roots.length > 1 && (
           <button
-            key={sib.localId}
-            className={`branch-chip${sib.streaming ? ' streaming' : ''}`}
-            onClick={() => onSwitchBranch(-1, sib.localId)}
-            title={sib.question}
+            className={`crumb-caret${pop?.key === 'root' ? ' open' : ''}`}
+            onClick={() => setPop(pop?.key === 'root' ? null : { key: 'root' })}
+            title={t('{n} 张平行卡片', { n: roots.length })}
+            aria-expanded={pop?.key === 'root'}
           >
-            {sib.anchor.quote.slice(0, 10)} · {(sib.question || t('新分支')).slice(0, 14)}
+            ⌄{roots.length}
           </button>
-        ))}
+        )}
         {chain.map((node, index) => {
-          const siblings = branchLists[index] ?? []
+          const next = chain[index + 1]
+          const total = branchLists[index].length + (next ? 1 : 0)
+          // 有「其它分支」才显示分叉标记；只有一条下行路径时不需要
+          const forked = branchLists[index].length > 0
+          const open = pop?.key === 'level' && pop.index === index
           return (
             <span key={node.localId} className="crumb-group">
               <span className="crumb-sep">›</span>
               <button
                 className={`crumb${index === activeIndex ? ' current' : ''}`}
                 onClick={() => onJump(index)}
-                title={node.anchor.quote}
+                title={`${node.anchor.quote}\n${node.question}`}
               >
                 <span className="crumb-num">L{index + 1}</span>
-                {node.anchor.quote.slice(0, 16)}
+                {labelOf(node)}
               </button>
-              {siblings.map((sib) => (
+              {forked && (
                 <button
-                  key={sib.localId}
-                  className={`branch-chip${sib.streaming ? ' streaming' : ''}`}
-                  onClick={() => onSwitchBranch(index, sib.localId)}
-                  title={t('切到分支：{text}', { text: sib.anchor.quote })}
+                  className={`crumb-caret${open ? ' open' : ''}`}
+                  onClick={() =>
+                    setPop(open ? null : { key: 'level', index })
+                  }
+                  title={t('{n} 个分支', { n: total })}
+                  aria-expanded={open}
                 >
-                  L{index + 2} · {sib.anchor.quote.slice(0, 12)}
+                  ⌄{total}
                 </button>
-              ))}
+              )}
             </span>
           )
         })}
@@ -472,6 +585,58 @@ export function Card({
         >
           ＋
         </button>
+        {pop && popRows.length > 1 && (
+          <div
+            className="crumb-pop"
+            ref={popRef}
+            role="menu"
+            onKeyDown={(event) => {
+              const last = popRows.length - 1
+              if (event.key === 'ArrowDown') {
+                event.preventDefault()
+                setPopCursor((value) => (value >= last ? 0 : value + 1))
+              } else if (event.key === 'ArrowUp') {
+                event.preventDefault()
+                setPopCursor((value) => (value <= 0 ? last : value - 1))
+              } else if (event.key === 'Enter') {
+                event.preventDefault()
+                choosePop(popRows[popCursor])
+              } else if (event.key === 'Escape') {
+                event.preventDefault()
+                event.stopPropagation()
+                setPop(null)
+              }
+            }}
+          >
+            <div className="crumb-pop-head">
+              {pop.key === 'root'
+                ? t('同一处内容的 {n} 张卡片', { n: popRows.length })
+                : t('第 {n} 层 · {m} 个分支', {
+                    n: pop.key === 'level' ? pop.index + 2 : 1,
+                    m: popRows.length,
+                  })}
+            </div>
+            {popRows.map((node, rowIndex) => (
+              <button
+                key={node.localId}
+                role="menuitem"
+                className={`crumb-pop-row${rowIndex === popCursor ? ' cursor' : ''}${
+                  node.localId === card.localId ? ' current' : ''
+                }`}
+                onMouseEnter={() => setPopCursor(rowIndex)}
+                onClick={() => choosePop(node)}
+              >
+                <span className={`crumb-pop-dot${node.streaming ? ' streaming' : ''}`} />
+                <span className="crumb-pop-text">
+                  <span className="crumb-pop-label">{labelOf(node)}</span>
+                  <span className="crumb-pop-gist">
+                    {node.streaming ? t('生成中…') : gistOf(node) || t('（暂无内容）')}
+                  </span>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
       </nav>
 
       {branching && (
