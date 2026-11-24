@@ -66,6 +66,10 @@ export interface CardRecord {
   answer: string
   created_at: string
   promoted_session_id?: string | null
+  profile_id?: string | null
+  level?: string | null
+  parent_card_id?: string | null
+  stack_depth?: number
 }
 
 export interface Topic {

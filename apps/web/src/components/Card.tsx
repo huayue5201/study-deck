@@ -23,13 +23,17 @@ export interface OpenCardState {
 
 interface Props {
   card: OpenCardState
-  /** 整条链：祖先 → 当前 → 可前进 */
+  /** 整条链：祖先 → 当前 */
   chain: OpenCardState[]
   activeIndex: number
+  /** 父卡 key → 其它分支（每条是父卡之后的整条后缀链） */
+  branches: Record<string, OpenCardState[][]>
   profile: CardProfile
   onClose: () => void
   /** 跳到链上第 index 层 */
   onJump: (index: number) => void
+  /** 切到某个祖先下的另一条分支 */
+  onSwitchBranch: (parentIndex: number, branchIndex: number) => void
   onBackToMain: () => void
   /** 在卡片正文里划词，准备嵌套展开 */
   onSelectInCard: () => void
@@ -62,9 +66,11 @@ export function Card({
   card,
   chain,
   activeIndex,
+  branches,
   profile,
   onClose,
   onJump,
+  onSwitchBranch,
   onBackToMain,
   onSelectInCard,
   onDepthChange,
@@ -293,8 +299,12 @@ export function Card({
   }
 
   const stack = chain.slice(0, activeIndex)
-  const forward = chain.slice(activeIndex + 1)
   const depth = activeIndex + 1
+  const keyOf = (target: OpenCardState) => target.id ?? `draft:${target.anchor.quote}`
+  const currentKey = keyOf(card)
+  const currentBranches: OpenCardState[][] = branches[currentKey] ?? []
+  // 分支选择菜单：记录「哪个父卡的分支列表」正在展开
+  const [branchMenu, setBranchMenu] = useState<number | null>(null)
 
   // 祖先卡做成斜置封面：索引直接对应链上的层号
   const covers = stack.slice(-4).map((ancestor, index) => {
@@ -305,20 +315,15 @@ export function Card({
 
   // 封面的基准几何（与 CSS 保持一致）：左 54、宽 380
   const coverLeft = 54
-  const coverWidth = 380
   const clampSpread = (room: number, count: number) =>
     Math.max(48, Math.min(118, Math.floor(room / Math.max(1, count))))
 
   // 掀开时最左/最右的封面不能越过窗口：按真实几何算可用扇开幅度
   const leftEdge = pos ? pos.left : viewport.w / 2
-  const rightRoom = pos ? viewport.w - (pos.left + coverLeft + coverWidth) - 8 : 320
   const spreadLeft = stack.length
     ? clampSpread(leftEdge + coverLeft - 8, Math.min(stack.length, 4))
     : 118
-  const spreadRight = forward.length
-    ? clampSpread(rightRoom, Math.min(forward.length, 3))
-    : 118
-  const showForward = rightRoom > 140
+
 
   // 入场动画从「被划的那段文字」位置长出来
   const enterOrigin = pos
@@ -337,18 +342,28 @@ export function Card({
       }
       onWheel={(event) => event.stopPropagation()}
     >
-      {chain.length > 1 && (
+      {(chain.length > 1 || chain.some((item) => (branches[keyOf(item)]?.length ?? 0) > 0)) && (
         <nav className="card-rail" aria-label={t('卡片链')}>
           {chain.map((item, k) => (
-            <button
-              key={`rail-${item.id ?? item.anchor.quote}-${k}`}
-              className={`rail-item ${k === activeIndex ? 'active' : ''}`}
-              onClick={() => onJump(k)}
-              title={t('第 {n} 层：{text}', { n: k + 1, text: item.anchor.quote })}
-            >
-              <span className="rail-num">L{k + 1}</span>
-              <span className="rail-quote">{item.anchor.quote.slice(0, 20)}</span>
-            </button>
+            <div key={`rail-${item.id ?? item.anchor.quote}-${k}`} className="rail-row">
+              <button
+                className={`rail-item ${k === activeIndex ? 'active' : ''}`}
+                onClick={() => onJump(k)}
+                title={t('第 {n} 层：{text}', { n: k + 1, text: item.anchor.quote })}
+              >
+                <span className="rail-num">L{k + 1}</span>
+                <span className="rail-quote">{item.anchor.quote.slice(0, 20)}</span>
+              </button>
+              {(branches[keyOf(item)]?.length ?? 0) > 0 && (
+                <button
+                  className="rail-branch"
+                  onClick={() => onSwitchBranch(k, 0)}
+                  title={t('这条卡有 {n} 个分支', { n: branches[keyOf(item)]?.length ?? 0 })}
+                >
+                  ⟣{branches[keyOf(item)]?.length}
+                </button>
+              )}
+            </div>
           ))}
         </nav>
       )}
@@ -358,29 +373,9 @@ export function Card({
         style={
           {
             '--spread-l': `${spreadLeft}px`,
-            '--spread-r': `${spreadRight}px`,
           } as React.CSSProperties
         }
       >
-        {showForward &&
-          forward.map((item, index) => (
-          <button
-            key={`fwd-${item.id ?? item.anchor.quote}-${index}`}
-            className="card-cover forward"
-            style={{ '--d': index + 1 } as React.CSSProperties}
-            onClick={() => onJump(activeIndex + 1 + index)}
-            title={t('前进到：{text}', { text: item.anchor.quote.slice(0, 40) })}
-          >
-              <span className="cover-head">
-                <span className="cover-level">L{activeIndex + 2 + index}</span>
-                <span className="cover-tab">{item.anchor.quote.slice(0, 8)}</span>
-              </span>
-              <span className="cover-quote">{item.anchor.quote.slice(0, 42)}</span>
-              <span className="cover-gist">
-                {item.answer.replace(/[#*>`_~\-]/g, ' ').replace(/\s+/g, ' ').slice(0, 110)}
-              </span>
-            </button>
-          ))}
         {stack.length > 0 && (
           <div
             className="pile-hotspot"
@@ -456,14 +451,32 @@ export function Card({
         >
           {t('第 {n} 层', { n: depth })}
         </button>
-        {forward.length > 0 && (
-          <button
-            className="card-forward"
-            onClick={() => onJump(activeIndex + 1)}
-            title={t('前进：回到刚才退下来的卡')}
-          >
-            {t('前进 {n}', { n: forward.length })}
-          </button>
+        {currentBranches.length > 0 && (
+          <div className="branch-anchor">
+            <button
+              className="card-branch"
+              onClick={() => setBranchMenu(branchMenu === null ? 0 : null)}
+              title={t('回到刚才退下来的分支')}
+            >
+              {t('分支 {n}', { n: currentBranches.length })}
+            </button>
+            {branchMenu !== null && (
+              <div className="branch-pop" role="menu">
+                {currentBranches.map((branch, index) => (
+                  <button
+                    key={`branch-${index}`}
+                    role="menuitem"
+                    onClick={() => {
+                      setBranchMenu(null)
+                      onSwitchBranch(activeIndex, index)
+                    }}
+                  >
+                    {t('分支 {n}', { n: index + 1 })} · {branch[0]?.anchor.quote.slice(0, 18)}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
         <button className="icon" onClick={requestClose} title={t('关闭整叠（Esc）')}>
           ×

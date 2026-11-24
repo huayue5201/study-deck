@@ -3,12 +3,15 @@ import { Card, type OpenCardState } from './Card'
 
 interface Props {
   card: OpenCardState | null
-  /** 整条链：祖先 → 当前 → 可前进 */
+  /** 整条链：祖先 → 当前 */
   chain: OpenCardState[]
   activeIndex: number
+  /** 父卡 key → 其它分支（每条是父卡之后的整条后缀链） */
+  branches: Record<string, OpenCardState[][]>
   profile: CardProfile
   onClose: () => void
   onJump: (index: number) => void
+  onSwitchBranch: (parentIndex: number, branchIndex: number) => void
   onBackToMain: () => void
   onSelectInCard: () => void
   onDepthChange: (level: string) => void
@@ -23,9 +26,11 @@ export function CardLayer({
   card,
   chain,
   activeIndex,
+  branches,
   profile,
   onClose,
   onJump,
+  onSwitchBranch,
   onBackToMain,
   onSelectInCard,
   onDepthChange,
@@ -42,9 +47,11 @@ export function CardLayer({
         card={card}
         chain={chain}
         activeIndex={activeIndex}
+        branches={branches}
         profile={profile}
         onClose={onClose}
         onJump={onJump}
+        onSwitchBranch={onSwitchBranch}
         onBackToMain={onBackToMain}
         onSelectInCard={onSelectInCard}
         onDepthChange={onDepthChange}
