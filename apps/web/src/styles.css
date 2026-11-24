@@ -126,25 +126,49 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
   z-index: 1;
   padding: 12px 16px;
   display: flex; flex-direction: column; gap: 6px;
-  background: linear-gradient(158deg, rgba(33, 29, 24, 0.99), rgba(19, 17, 14, 1));
-  border: 1px solid var(--line); border-radius: 14px;
+  /* 每层一个色阶：越深越暗，顶部一道内高光当「纸边」，层次一眼能分开 */
+  background: linear-gradient(
+    158deg,
+    hsl(calc(30 + var(--d) * 4) 13% calc(17% + var(--d) * 3%)) 0%,
+    hsl(calc(26 + var(--d) * 3) 11% calc(10% + var(--d) * 1.6%)) 100%
+  );
+  border: 1px solid hsl(34 16% calc(23% + var(--d) * 4.2%));
+  border-radius: 14px;
   color: var(--muted); cursor: pointer; pointer-events: auto;
   overflow: hidden; text-align: left;
   transform-origin: 50% 50%;
   transform: translate(calc(76px + var(--d) * 16px), calc(-32px + var(--d) * -12px))
     rotate(calc(var(--d) * 1.7deg));
-  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.5);
+  box-shadow:
+    0 calc(14px + var(--d) * 5px) calc(34px + var(--d) * 10px) rgba(0, 0, 0, calc(0.42 + var(--d) * 0.07)),
+    inset 0 1px 0 rgba(255, 243, 220, calc(0.09 + var(--d) * 0.05)),
+    inset 1px 0 0 rgba(225, 180, 106, calc(0.06 + var(--d) * 0.035));
   animation: card-fade 0.22s ease;
+  /* 越深越暗：一层薄纱把远处压下去，聚焦卡自然最亮 */
   transition:
     transform 0.3s cubic-bezier(0.22, 0.9, 0.3, 1),
     box-shadow 0.24s ease,
     border-color 0.2s ease,
     opacity 0.2s ease;
 }
-.card-cover:hover { border-color: rgba(225, 180, 106, 0.45); }
-/* 前进方向：镜像到牌堆另一侧 */
+.card-cover::after {
+  content: ''; position: absolute; inset: 0; border-radius: inherit;
+  background: rgba(0, 0, 0, calc(0.04 + var(--d) * 0.055));
+  pointer-events: none;
+}
+.card-cover:hover { border-color: rgba(225, 180, 106, 0.5); }
+/* 前进方向：镜像到牌堆另一侧，用冷色区分「未来」 */
+.card-cover.forward::after {
+  background: rgba(6, 12, 22, calc(0.08 + var(--d) * 0.06));
+}
 .card-cover.forward {
   opacity: 0.62;
+  background: linear-gradient(
+    202deg,
+    hsl(210 12% calc(17% + var(--d) * 3.4%)),
+    hsl(212 10% calc(11% + var(--d) * 2.2%))
+  );
+  border-color: hsl(208 16% calc(23% + var(--d) * 4.2%));
   transform: translate(calc(76px + var(--d) * -16px), calc(-32px + var(--d) * -12px))
     rotate(calc(var(--d) * -1.7deg));
 }
