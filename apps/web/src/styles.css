@@ -125,40 +125,91 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
   position: fixed; z-index: 50; pointer-events: none;
 }
 .card-stack .card { pointer-events: auto; }
-/* 堆叠：默认只露纸边；悬停/点层级徽标后「扇开」，每张都能点 */
-.card-peek {
-  position: absolute; top: 0; height: 28px; z-index: calc(10 - var(--i));
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: 0 14px;
-  font-size: 10px; color: var(--muted); letter-spacing: 0.03em;
-  background: linear-gradient(180deg, var(--panel-2), var(--panel));
-  border: 1px solid var(--line); border-bottom: none;
-  border-radius: 12px 12px 0 0; cursor: pointer;
-  pointer-events: auto; white-space: nowrap; overflow: hidden;
-  box-shadow: 0 -6px 16px rgba(0, 0, 0, 0.22);
-  transform: translateY(calc(var(--i) * -12px));
+/* Card Pile：祖先卡像真牌一样「压」在当前卡下面，
+ * 略微错开、带角度，只露出边角和层号标签；悬停时整叠散开、单张抬起。 */
+.card-stack {
+  perspective: 1500px;
+  perspective-origin: 38% 42%;
+}
+.card-deck { position: relative; transform-style: preserve-3d; }
+
+/* 1) 静止：一堆牌，错开 + 微角度，只露出边角 */
+.card-cover {
+  position: absolute; inset: 0;
+  padding: 12px 16px;
+  display: flex; flex-direction: column; gap: 6px;
+  background: linear-gradient(158deg, rgba(33, 29, 24, 0.99), rgba(19, 17, 14, 1));
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  color: var(--muted); cursor: pointer; pointer-events: auto;
+  overflow: hidden; text-align: left;
+  transform-origin: 50% 50%;
+  transform:
+    translate(calc(var(--d) * 17px), calc(var(--d) * -14px))
+    rotate(calc(var(--d) * 1.8deg))
+    scale(calc(1 - var(--d) * 0.008));
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.5);
   transition:
-    transform 0.2s cubic-bezier(0.2, 0.9, 0.3, 1),
-    height 0.2s ease,
-    opacity 0.2s ease,
+    transform 0.28s cubic-bezier(0.22, 0.9, 0.3, 1),
+    box-shadow 0.24s ease,
     border-color 0.2s ease;
 }
-.card-peek .peek-label {
-  opacity: 0; overflow: hidden; text-overflow: ellipsis;
-  transition: opacity 0.14s ease;
+.card-cover:hover { border-color: rgba(225, 180, 106, 0.4); }
+
+/* 2) 掀开（悬停右上角热区 / 点层号）：摊成 Cover Flow，方便挑 */
+.card-deck.deck-fan .card-cover {
+  inset: auto; left: 54px; top: 18px; width: 380px; height: 232px;
+  transform-origin: left center;
+  transform:
+    translateX(calc(var(--d) * -118px))
+    translateZ(calc(var(--d) * -140px))
+    rotateY(30deg)
+    scale(calc(1 - var(--d) * 0.05));
+  box-shadow: -16px 20px 44px rgba(0, 0, 0, 0.52);
 }
-.card-peek:hover { border-color: var(--accent); color: var(--text); }
-.card-stack.peeks-open .card-peek {
-  height: 34px; opacity: 1 !important; color: var(--text);
-  transform: translateY(calc(var(--i) * -48px));
+/* 悬停只「前移 + 提亮」，不做横向位移，否则点下去时卡片已经挪开了 */
+.card-deck.deck-fan .card-cover:hover {
+  border-color: rgba(225, 180, 106, 0.65);
+  box-shadow: -22px 26px 58px rgba(0, 0, 0, 0.62);
+  transform:
+    translateX(calc(var(--d) * -118px))
+    translateZ(calc(var(--d) * -140px + 70px))
+    rotateY(24deg)
+    scale(calc(1 - var(--d) * 0.04));
 }
-.card-stack.peeks-open .card-peek .peek-label { opacity: 1; }
-.peek-hover-zone {
-  position: absolute; left: 8px; right: 8px; top: -40px; height: 40px;
-  z-index: 30; pointer-events: auto;
+.card-deck.deck-collapsed .card-cover { opacity: 0; pointer-events: none; }
+
+/* 掀开热区：牌堆右上角那块被压住的边 */
+.pile-hotspot {
+  position: absolute; right: -46px; top: -40px; width: 108px; height: 96px;
+  z-index: 30; pointer-events: auto; cursor: pointer;
+  border-radius: 16px;
+  transition: background 0.2s ease;
 }
-.card-stack.peeks-open .peek-hover-zone { pointer-events: none; }
-.peek-more { color: var(--accent); font-size: 10px; }
+.pile-hotspot:hover {
+  background: radial-gradient(circle at 65% 35%, rgba(225, 180, 106, 0.16), transparent 72%);
+}
+
+.cover-head {
+  position: absolute; top: 10px; right: 12px;
+  display: flex; align-items: center; gap: 6px;
+}
+.cover-level {
+  font-size: 10px; color: var(--faint); letter-spacing: 0.08em;
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px;
+  background: rgba(20, 18, 15, 0.9);
+}
+.cover-more { font-size: 10px; color: var(--accent); }
+.cover-quote {
+  font-size: 13px; color: var(--text); font-weight: 600; margin-top: 26px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cover-gist {
+  font-size: 11px; line-height: 1.6; color: var(--muted);
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.card-stack .card { position: relative; z-index: 10; }
 
 .card { box-shadow: 0 22px 48px rgba(0, 0, 0, 0.55); }
 @keyframes card-in {

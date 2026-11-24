@@ -75,8 +75,8 @@ export function Card({
   const { t } = useI18n()
   const [draft, setDraft] = useState('')
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
-  // 悬停时把下面的卡「扇」出来，方便自由选层
-  const [peekOpen, setPeekOpen] = useState(false)
+  // 卡片堆开合（Cover Flow）
+  const [deckOpen, setDeckOpen] = useState(false)
   const lastHeight = useRef(0)
   const lastHeightAt = useRef(0)
   const ref = useRef<HTMLDivElement | null>(null)
@@ -209,13 +209,13 @@ export function Card({
   }
 
   const depth = stack.length + 1
-  // 只露最上面 2 层，更多用 +N 表示——堆太厚反而看不清
-  const visiblePeeks = stack.slice(-2).map((ancestor, index) => ({
+  // Cover Flow：祖先卡做成斜置的「封面」，离当前卡越远越深越小
+  const covers = stack.slice(-4).map((ancestor, index) => ({
     ancestor,
-    index: stack.length - Math.min(stack.length, 2) + index,
-    offset: 2 - Math.min(stack.length, 2) + index + 1,
+    index: stack.length - Math.min(stack.length, 4) + index,
+    order: stack.length - index,
   }))
-  const hiddenAbove = Math.max(0, stack.length - 2)
+  const hiddenCovers = Math.max(0, stack.length - 4)
 
   // 入场动画从「被划的那段文字」位置长出来
   const enterOrigin = pos
@@ -226,44 +226,46 @@ export function Card({
 
   return (
     <div
-      className={`card-stack ${peekOpen ? 'peeks-open' : ''}`}
+      className="card-stack"
       style={
         pos
           ? { left: pos.left, top: pos.top }
           : { visibility: 'hidden' }
       }
-      onMouseLeave={() => setPeekOpen(false)}
       onWheel={(event) => event.stopPropagation()}
     >
-      {stack.length > 0 && (
-        <div
-          className="peek-hover-zone"
-          onMouseEnter={() => setPeekOpen(true)}
-          title={t('悬停展开卡片堆')}
-        />
-      )}
-      {visiblePeeks.map(({ ancestor, index, offset }) => (
-        <button
-          key={`${ancestor.id ?? ancestor.anchor.quote}-${index}`}
-          className="card-peek"
-          style={
-            {
-              '--i': offset,
-              left: 12 + offset * 9,
-              right: 12 + offset * 9,
-            } as React.CSSProperties
-          }
-          onClick={() => onPopTo(index)}
-          title={t('回到：{text}', { text: ancestor.anchor.quote.slice(0, 40) })}
-        >
-          <span className="peek-label">
-            {t('第 {n} 层', { n: stack.length - (stack.length - 1 - index) })}
-            {' · '}
-            {ancestor.anchor.quote.slice(0, 24)}
-          </span>
-          {hiddenAbove > 0 && offset === 2 && <span className="peek-more">+{hiddenAbove}</span>}
-        </button>
-      ))}
+      <div className={`card-deck ${deckOpen ? 'deck-fan' : ''}`}>
+        {stack.length > 0 && (
+          <div
+            className="pile-hotspot"
+            onMouseEnter={() => setDeckOpen(true)}
+            onMouseLeave={() => setDeckOpen(false)}
+            title={t('掀开卡片堆')}
+          />
+        )}
+        {covers.map(({ ancestor, index, order }) => (
+          <button
+            key={`${ancestor.id ?? ancestor.anchor.quote}-${index}`}
+            className="card-cover"
+            style={{ '--d': order } as React.CSSProperties}
+            onClick={() => onPopTo(index)}
+            title={t('回到：{text}', { text: ancestor.anchor.quote.slice(0, 40) })}
+          >
+            <span className="cover-head">
+              <span className="cover-level">{t('第 {n} 层', { n: index + 1 })}</span>
+              {hiddenCovers > 0 && index === 0 && (
+                <span className="cover-more">+{hiddenCovers}</span>
+              )}
+            </span>
+            <span className="cover-quote">{ancestor.anchor.quote.slice(0, 42)}</span>
+            <span className="cover-gist">
+              {ancestor.answer
+                .replace(/[#*>`_~\-]/g, ' ')
+                .replace(/\s+/g, ' ')
+                .slice(0, 110)}
+            </span>
+          </button>
+        ))}
 
       <div
         className="card"
@@ -287,9 +289,9 @@ export function Card({
           {card.anchor.quote.slice(0, 60)}
         </div>
         <button
-          className={`card-depth-badge ${peekOpen ? 'active' : ''}`}
-          onClick={() => setPeekOpen((value) => !value)}
-          title={stack.length > 0 ? t('展开卡片堆（{n} 层）', { n: stack.length }) : t('第 {n} 层', { n: depth })}
+          className={`card-depth-badge ${deckOpen ? 'active' : ''}`}
+          onClick={() => setDeckOpen((value) => !value)}
+          title={t('卡片堆（{n} 层）', { n: stack.length + 1 })}
         >
           {t('第 {n} 层', { n: depth })}
         </button>
@@ -403,6 +405,7 @@ export function Card({
           )}
         </div>
       </footer>
+      </div>
       </div>
     </div>
   )

@@ -348,6 +348,8 @@ const EN: Record<string, string> = {
   '你是「卡片」…': 'You are the card…',
   '悬停展开卡片堆': 'Hover to fan out the stack',
   '展开卡片堆（{n} 层）': 'Fan out the stack ({n} cards)',
+  '卡片堆（{n} 层）': 'Card stack ({n})',
+  '掀开卡片堆': 'Fan out the pile',
 }
 
 function interpolate(text: string, vars?: Record<string, string | number>): string {
