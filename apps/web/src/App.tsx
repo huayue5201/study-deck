@@ -29,7 +29,6 @@ import {
   searchMessages,
   streamChat,
   promoteCard,
-  deleteCard as deleteCardApi,
   listTopics,
   updateTopic,
   listCourses,
@@ -1171,47 +1170,6 @@ export default function App() {
     )
   }, [activeProfile, addCard, card, cards, focusOn, pending, runCard, saveCard, t])
 
-  /** 删掉面包屑上的某一层（连同它的所有分支），服务端同步删除 */
-  const deleteNode = useCallback(
-    (localId: string) => {
-      const target = cards[localId]
-      if (!target) return
-
-      // 收集整棵子树
-      const doomed = new Set<string>([localId])
-      let grew = true
-      while (grew) {
-        grew = false
-        for (const node of Object.values(cards)) {
-          if (!doomed.has(node.localId) && node.parentLocalId && doomed.has(node.parentLocalId)) {
-            doomed.add(node.localId)
-            grew = true
-          }
-        }
-      }
-
-      setCards((prev) => {
-        const next = { ...prev }
-        for (const id of doomed) delete next[id]
-        return next
-      })
-
-      // 焦点若被删掉，退回最近的存活祖先
-      setFocusId((current) => {
-        if (!current || !doomed.has(current)) return current
-        const parent = target.parentLocalId
-        return parent && !doomed.has(parent) ? parent : null
-      })
-
-      for (const id of doomed) delete rememberedFocusRef.current[id]
-
-      if (target.id) {
-        void deleteCardApi(target.id).catch((err) => setError(String(err)))
-      }
-    },
-    [cards],
-  )
-
   // 关卡片只收起界面：账本只认用户点「保存到账本」，不做自动记账
   const closeCard = useCallback(() => {
     setFocusId(null)
@@ -1543,7 +1501,6 @@ export default function App() {
         onSwitchBranch={switchBranch}
         onToggleDock={() => setPinned((value) => !value)}
         onBranch={branchFrom}
-        onDeleteNode={deleteNode}
         onBackToMain={() => void backToMain()}
         onSelectInCard={handleMouseUp}
         onDepthChange={(level) => {
