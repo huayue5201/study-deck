@@ -82,6 +82,28 @@ export function Card({
   const ref = useRef<HTMLDivElement | null>(null)
   const drag = useRef<{ dx: number; dy: number } | null>(null)
 
+  const cardKey = card.anchor.quote + (card.parentCardId ?? '')
+  const prevKey = useRef(cardKey)
+  const [switching, setSwitching] = useState(false)
+  useEffect(() => {
+    if (prevKey.current === cardKey) return
+    prevKey.current = cardKey
+    setSwitching(true)
+    const timer = window.setTimeout(() => setSwitching(false), 220)
+    return () => window.clearTimeout(timer)
+  }, [cardKey])
+
+  // 视口尺寸：决定扇开幅度，避免封面溢出软件边框
+  const [viewport, setViewport] = useState(() => ({
+    w: window.innerWidth,
+    h: window.innerHeight,
+  }))
+  useEffect(() => {
+    const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight })
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
   const levels = profile.levels
   const selectedLevel =
     levels.find((level) => level.id === card.level) ??
@@ -111,9 +133,14 @@ export function Card({
     setPos(clampToViewport(card.rect.left, top, width, height))
   }, [card.rect])
 
+  // 只在卡片首次出现时定位；之后切层不再重新计算，避免卡片位置跳动
+  const placedRef = useRef(false)
   useLayoutEffect(() => {
+    if (placedRef.current) return
+    placedRef.current = true
     place()
-  }, [place])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // 窗口尺寸变化后重新夹紧，避免卡片被挤出视口
   useEffect(() => {
@@ -208,6 +235,17 @@ export function Card({
   })
   const hiddenCovers = Math.max(0, stack.length - 4)
 
+  // 左/右可用宽度（卡片位置固定后就不变），保证封面不溢出窗口
+  const leftRoom = pos ? Math.max(0, pos.left - 12) : 320
+  const rightRoom = pos ? Math.max(0, viewport.w - pos.left - 510 - 12) : 320
+  const spreadLeft = stack.length
+    ? Math.max(54, Math.min(118, (leftRoom - 300) / Math.max(1, Math.min(stack.length, 4))))
+    : 118
+  const spreadRight = forward.length
+    ? Math.max(54, Math.min(118, (rightRoom - 300) / Math.max(1, Math.min(forward.length, 3))))
+    : 118
+  const showForward = rightRoom > 200
+
   // 入场动画从「被划的那段文字」位置长出来
   const enterOrigin = pos
     ? `${Math.max(0, Math.min(card.rect.left + card.rect.width / 2 - pos.left, 510))}px ${
@@ -241,8 +279,17 @@ export function Card({
         </nav>
       )}
 
-      <div className={`card-deck ${deckOpen ? 'deck-fan' : ''}`}>
-        {forward.map((item, index) => (
+      <div
+        className={`card-deck ${deckOpen ? 'deck-fan' : ''}`}
+        style={
+          {
+            '--spread-l': `${spreadLeft}px`,
+            '--spread-r': `${spreadRight}px`,
+          } as React.CSSProperties
+        }
+      >
+        {showForward &&
+          forward.map((item, index) => (
           <button
             key={`fwd-${item.id ?? item.anchor.quote}-${index}`}
             className="card-cover forward"
@@ -250,16 +297,16 @@ export function Card({
             onClick={() => onJump(activeIndex + 1 + index)}
             title={t('前进到：{text}', { text: item.anchor.quote.slice(0, 40) })}
           >
-            <span className="cover-head">
-              <span className="cover-level">L{activeIndex + 2 + index}</span>
-              <span className="cover-tab">{item.anchor.quote.slice(0, 8)}</span>
-            </span>
-            <span className="cover-quote">{item.anchor.quote.slice(0, 42)}</span>
-            <span className="cover-gist">
-              {item.answer.replace(/[#*>`_~\-]/g, ' ').replace(/\s+/g, ' ').slice(0, 110)}
-            </span>
-          </button>
-        ))}
+              <span className="cover-head">
+                <span className="cover-level">L{activeIndex + 2 + index}</span>
+                <span className="cover-tab">{item.anchor.quote.slice(0, 8)}</span>
+              </span>
+              <span className="cover-quote">{item.anchor.quote.slice(0, 42)}</span>
+              <span className="cover-gist">
+                {item.answer.replace(/[#*>`_~\-]/g, ' ').replace(/\s+/g, ' ').slice(0, 110)}
+              </span>
+            </button>
+          ))}
         {stack.length > 0 && (
           <div
             className="pile-hotspot"
@@ -294,8 +341,7 @@ export function Card({
         ))}
 
       <div
-        className="card"
-        key={card.anchor.quote + (card.parentCardId ?? '')}
+        className={`card ${switching ? 'card-switch' : ''}`}
         ref={ref}
         style={{ '--enter-origin': enterOrigin } as React.CSSProperties}
         onMouseUp={(event) => {

@@ -149,6 +149,7 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
     rotate(calc(var(--d) * 1.8deg))
     scale(calc(1 - var(--d) * 0.008));
   box-shadow: 0 16px 38px rgba(0, 0, 0, 0.5);
+  animation: card-fade 0.22s ease;
   transition:
     transform 0.28s cubic-bezier(0.22, 0.9, 0.3, 1),
     box-shadow 0.24s ease,
@@ -161,7 +162,7 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
   inset: auto; left: 54px; top: 18px; width: 380px; height: 232px;
   transform-origin: left center;
   transform:
-    translateX(calc(var(--d) * -118px))
+    translateX(calc(var(--d) * var(--spread-l, 118px) * -1))
     translateZ(calc(var(--d) * -140px))
     rotateY(30deg)
     scale(calc(1 - var(--d) * 0.05));
@@ -172,7 +173,7 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
   border-color: rgba(225, 180, 106, 0.65);
   box-shadow: -22px 26px 58px rgba(0, 0, 0, 0.62);
   transform:
-    translateX(calc(var(--d) * -118px))
+    translateX(calc(var(--d) * var(--spread-l, 118px) * -1))
     translateZ(calc(var(--d) * -140px + 70px))
     rotateY(24deg)
     scale(calc(1 - var(--d) * 0.04));
@@ -191,7 +192,7 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
   inset: auto; left: auto; right: 54px; top: 18px; width: 380px; height: 232px;
   transform-origin: right center;
   transform:
-    translateX(calc(var(--d) * 118px))
+    translateX(calc(var(--d) * var(--spread-r, 118px)))
     translateZ(calc(var(--d) * -140px))
     rotateY(-30deg)
     scale(calc(1 - var(--d) * 0.05));
@@ -199,7 +200,7 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
 .card-deck.deck-fan .card-cover.forward:hover {
   border-color: rgba(225, 180, 106, 0.65);
   transform:
-    translateX(calc(var(--d) * 118px))
+    translateX(calc(var(--d) * var(--spread-r, 118px)))
     translateZ(calc(var(--d) * -140px + 70px))
     rotateY(-24deg)
     scale(calc(1 - var(--d) * 0.04));
@@ -253,6 +254,12 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
   from { opacity: 0; transform: scale(0.88) translateY(8px); }
   to { opacity: 1; transform: scale(1) translateY(0); }
 }
+/* 切层：卡片本体不重挂载（位置不跳），只做淡入 */
+@keyframes card-fade {
+  from { opacity: 0.3; }
+  to { opacity: 1; }
+}
+.card.card-switch { animation: card-fade 0.2s ease; }
 .card-stack .card { animation: card-in 0.22s cubic-bezier(0.18, 0.9, 0.28, 1); transform-origin: var(--enter-origin, 50% 0%); }
 .peek-more { color: var(--accent); font-size: 10px; }
 .card-depth-badge {
@@ -1422,14 +1429,17 @@ button.badge.encounters { color: var(--accent); border-color: rgba(225, 180, 106
 
 /* 左侧竖向层级标签（C）：像浏览器标签页，一眼看完整条链 */
 .card-rail {
-  position: absolute; right: calc(100% + 14px); top: 0;
-  width: 170px; max-height: 100%; overflow-y: auto;
+  position: absolute; right: calc(100% + 12px); top: 0;
+  width: 40px; max-height: 100%; overflow: hidden auto;
+  transition: width 0.18s ease;
   display: flex; flex-direction: column; gap: 4px;
   padding: 2px; pointer-events: auto;
   scrollbar-width: thin;
 }
+.card-rail:hover { width: 172px; }
 .rail-item {
   display: flex; align-items: center; gap: 7px;
+  overflow: hidden; min-width: 40px;
   padding: 6px 8px; border-radius: 9px;
   background: rgba(24, 21, 18, 0.86); border: 1px solid var(--line);
   color: var(--muted); font-size: 11px; text-align: left; cursor: pointer;
@@ -1441,4 +1451,8 @@ button.badge.encounters { color: var(--accent); border-color: rgba(225, 180, 106
   background: rgba(225, 180, 106, 0.08);
 }
 .rail-num { font-size: 9.5px; color: var(--accent); flex: 0 0 auto; letter-spacing: 0.05em; }
-.rail-quote { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-quote {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  opacity: 0; transition: opacity 0.14s ease;
+}
+.card-rail:hover .rail-quote { opacity: 1; }
