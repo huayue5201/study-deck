@@ -83,20 +83,30 @@ export function Card({
   const drag = useRef<{ dx: number; dy: number } | null>(null)
 
   const bodyRef = useRef<HTMLDivElement | null>(null)
-  const cardKey = `${card.anchor.quote}|${card.parentCardId ?? ''}`
+  // 用「链上位置 + 卡片身份」作为切换标识：同名引文的不同层也算切换
+  const cardKey = `${activeIndex}:${card.id ?? card.anchor.quote}`
   const prevKey = useRef(cardKey)
-  const [switching, setSwitching] = useState(false)
   const [closing, setClosing] = useState(false)
+  const [ghost, setGhost] = useState<OpenCardState | null>(null)
+  const prevCard = useRef<OpenCardState | null>(null)
 
-  // 切层：淡入 + 正文回到顶部（DOM 不重建，所以要手动归零滚动位）
+  // 切层：旧卡做一层「影子」淡出，新卡淡入；正文回到顶部
   useEffect(() => {
-    if (prevKey.current === cardKey) return
+    if (prevKey.current === cardKey) {
+      prevCard.current = card
+      return
+    }
     prevKey.current = cardKey
+    const previous = prevCard.current
+    prevCard.current = card
     if (bodyRef.current) bodyRef.current.scrollTop = 0
-    setSwitching(true)
-    const timer = window.setTimeout(() => setSwitching(false), 220)
-    return () => window.clearTimeout(timer)
-  }, [cardKey])
+    // 只让「影子」淡出：卡片本身保持不透明，避免透出背后的聊天内容造成闪烁感
+    if (previous) {
+      setGhost(previous)
+      const timer = window.setTimeout(() => setGhost(null), 240)
+      return () => window.clearTimeout(timer)
+    }
+  }, [card, cardKey])
 
   // 关卡片：先播退场，再交给上层卸载
   const requestClose = useCallback(() => {
@@ -186,6 +196,26 @@ export function Card({
     observer.observe(el)
     return () => observer.disconnect()
   }, [])
+
+  // 卡片高度 = 内容高度（有上下限），短内容不留白、长内容到顶后内部滚动
+  const [cardHeight, setCardHeight] = useState<number | null>(null)
+  const innerRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const el = ref.current
+    const body = bodyRef.current
+    const inner = innerRef.current
+    if (!el || !body || !inner) return
+    const frame = window.requestAnimationFrame(() => {
+      const maxHeight = Math.min(window.innerHeight * 0.66, 620)
+      const style = window.getComputedStyle(body)
+      const bodyPad = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
+      // 卡片固定部分（头部 / 追问 / 底部）的高度
+      const chrome = el.offsetHeight - body.offsetHeight
+      const desired = Math.min(Math.max(inner.offsetHeight + bodyPad + chrome, 340), maxHeight)
+      setCardHeight((prev) => (prev !== null && Math.abs(prev - desired) < 2 ? prev : desired))
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [card.answer, cardKey, viewport.h])
 
   // 流式输出时正文缓动跟到底，避免每个 token 都硬跳一次
   useEffect(() => {
@@ -385,14 +415,29 @@ export function Card({
         ))}
 
       <div
-        className={`card ${switching ? 'card-switch' : ''}`}
+        className="card"
         ref={ref}
-        style={{ '--enter-origin': enterOrigin } as React.CSSProperties}
+        style={
+          {
+            '--enter-origin': enterOrigin,
+            height: cardHeight ?? undefined,
+          } as React.CSSProperties
+        }
         onMouseUp={(event) => {
           event.stopPropagation()
           onSelectInCard()
         }}
       >
+      {ghost && (
+        <div className="card-ghost" aria-hidden="true">
+          <div className="card-ghost-head">{ghost.anchor.quote.slice(0, 60)}</div>
+          <div
+            className="card-ghost-body"
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(ghost.answer) }}
+          />
+        </div>
+      )}
+
       <header
         className="card-head"
         onPointerDown={startDrag}
@@ -479,12 +524,13 @@ export function Card({
         </div>
       )}
 
-      <div
-        className="card-body"
-        ref={bodyRef}
-        data-card-id={card.id ?? 'draft'}
-        dangerouslySetInnerHTML={{ __html: renderMarkdown(card.answer || (card.streaming ? '…' : '')) }}
-      />
+      <div className="card-body" ref={bodyRef} data-card-id={card.id ?? 'draft'}>
+        <div
+          className="card-body-inner"
+          ref={innerRef}
+          dangerouslySetInnerHTML={{ __html: renderMarkdown(card.answer || (card.streaming ? '…' : '')) }}
+        />
+      </div>
 
       <div className="card-followup">
         <input

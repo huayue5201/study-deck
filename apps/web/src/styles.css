@@ -233,7 +233,23 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
   animation: card-in 0.22s cubic-bezier(0.18, 0.9, 0.28, 1);
   transform-origin: var(--enter-origin, 50% 0%);
 }
-.card.card-switch { animation: card-fade 0.2s ease; }
+.card-ghost {
+  position: absolute; inset: 0; z-index: 6; pointer-events: none;
+  overflow: hidden; border-radius: inherit;
+  padding: 12px 16px;
+  background: linear-gradient(180deg, #221e18, #1a1713);
+  animation: ghost-out 0.24s ease forwards;
+}
+.card-ghost-head {
+  font-size: 13px; font-weight: 600; color: var(--text);
+  padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--line);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.card-ghost-body {
+  font-family: var(--font-reading); font-size: 14.5px; line-height: 1.85;
+  color: var(--text-soft); opacity: 0.75;
+}
+@keyframes ghost-out { to { opacity: 0; } }
 .card-stack.closing { animation: card-out 0.16s ease forwards; }
 .card-stack.closing .card-cover { opacity: 0; }
 
@@ -282,6 +298,7 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
   flex: 1 1 auto; min-height: 0; padding: 4px 14px 10px;
   overflow-y: auto; overscroll-behavior: contain; font-size: 14px;
 }
+.card-body-inner { display: block; }
 .card-body :is(p, ul, ol) { margin: 0 0 8px; }
 .card-body strong { color: #fff; }
 .card-followup { display: flex; gap: 8px; padding: 8px 14px; border-top: 1px solid var(--line); }
@@ -948,7 +965,9 @@ button.danger { color: #e6a49b; border-color: rgba(217, 141, 130, 0.35); }
 /* ---------- card ---------- */
 
 .card {
-  width: 510px; height: min(66vh, 600px); border-radius: 16px; border-color: var(--line-strong);
+  width: 510px; min-height: 360px; max-height: min(66vh, 620px);
+  border-radius: 16px; border-color: var(--line-strong);
+  transition: height 0.22s cubic-bezier(0.22, 0.9, 0.3, 1);
   background: linear-gradient(180deg, #221e18, #1a1713);
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
