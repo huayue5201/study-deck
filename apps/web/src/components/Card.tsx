@@ -303,8 +303,6 @@ export function Card({
   const keyOf = (target: OpenCardState) => target.id ?? `draft:${target.anchor.quote}`
   const currentKey = keyOf(card)
   const currentBranches: OpenCardState[][] = branches[currentKey] ?? []
-  // 分支选择菜单：记录「哪个父卡的分支列表」正在展开
-  const [branchMenu, setBranchMenu] = useState<number | null>(null)
 
   // 祖先卡做成斜置封面：索引直接对应链上的层号
   const covers = stack.slice(-4).map((ancestor, index) => {
@@ -313,17 +311,14 @@ export function Card({
   })
   const hiddenCovers = Math.max(0, stack.length - 4)
 
-  // 封面的基准几何（与 CSS 保持一致）：左 54、宽 380
+  // 掀开时最左的封面不能越过窗口
   const coverLeft = 54
   const clampSpread = (room: number, count: number) =>
     Math.max(48, Math.min(118, Math.floor(room / Math.max(1, count))))
-
-  // 掀开时最左/最右的封面不能越过窗口：按真实几何算可用扇开幅度
   const leftEdge = pos ? pos.left : viewport.w / 2
   const spreadLeft = stack.length
     ? clampSpread(leftEdge + coverLeft - 8, Math.min(stack.length, 4))
     : 118
-
 
   // 入场动画从「被划的那段文字」位置长出来
   const enterOrigin = pos
@@ -451,33 +446,6 @@ export function Card({
         >
           {t('第 {n} 层', { n: depth })}
         </button>
-        {currentBranches.length > 0 && (
-          <div className="branch-anchor">
-            <button
-              className="card-branch"
-              onClick={() => setBranchMenu(branchMenu === null ? 0 : null)}
-              title={t('回到刚才退下来的分支')}
-            >
-              {t('分支 {n}', { n: currentBranches.length })}
-            </button>
-            {branchMenu !== null && (
-              <div className="branch-pop" role="menu">
-                {currentBranches.map((branch, index) => (
-                  <button
-                    key={`branch-${index}`}
-                    role="menuitem"
-                    onClick={() => {
-                      setBranchMenu(null)
-                      onSwitchBranch(activeIndex, index)
-                    }}
-                  >
-                    {t('分支 {n}', { n: index + 1 })} · {branch[0]?.anchor.quote.slice(0, 18)}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
         <button className="icon" onClick={requestClose} title={t('关闭整叠（Esc）')}>
           ×
         </button>
@@ -498,6 +466,22 @@ export function Card({
         <span className="crumb-sep">›</span>
         <span className="crumb current">{card.anchor.quote.slice(0, 14)}</span>
       </div>
+
+      {currentBranches.length > 0 && (
+        <div className="card-branches">
+          <span className="branch-label">{t('分支')}</span>
+          {currentBranches.map((branch, index) => (
+            <button
+              key={`branch-chip-${index}`}
+              className="branch-chip"
+              onClick={() => onSwitchBranch(activeIndex, index)}
+              title={t('切到分支：{text}', { text: branch[0]?.anchor.quote ?? '' })}
+            >
+              L{activeIndex + 2} · {(branch[0]?.anchor.quote ?? '').slice(0, 16)}
+            </button>
+          ))}
+        </div>
+      )}
 
       {depth >= 5 && (
         <div className="card-warning">

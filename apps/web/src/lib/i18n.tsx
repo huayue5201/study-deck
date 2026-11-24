@@ -336,11 +336,10 @@ const EN: Record<string, string> = {
   '你是「卡片」…': 'You are the card…',
   '卡片堆（{n} 层）': 'Card stack ({n})',
   '掀开卡片堆': 'Fan out the pile',
-  '分支 {n}': 'Branch {n}',
   '这条卡有 {n} 个分支': 'This card has {n} branches',
-  '回到刚才退下来的分支': 'Back to the branch you just left',
   '卡片链': 'Card chain',
   '第 {n} 层：{text}': 'Level {n}: {text}',
+  '切到分支：{text}': 'Switch to branch: {text}',
 }
 
 function interpolate(text: string, vars?: Record<string, string | number>): string {
