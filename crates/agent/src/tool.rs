@@ -325,6 +325,10 @@ fn search_text(args: &Value, ctx: &ToolContext) -> Result<String> {
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
+            // 不跟随符号链接：既能读到项目外的文件，也会让遍历成环
+            if file_type.is_symlink() {
+                continue;
+            }
             if file_type.is_dir() {
                 stack.push((path, depth + 1));
                 continue;

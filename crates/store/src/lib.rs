@@ -177,7 +177,7 @@ const ENTRY_SELECT: &str = "SELECT e.id, e.term, e.summary, e.mastery, e.created
 
 pub struct Store {
     conn: Mutex<Connection>,
-    has_fts: bool,
+    path: std::path::PathBuf,
 }
 
 fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
@@ -199,11 +199,6 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Re
 fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
-    )?;
-    let current: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-        [],
-        |row| row.get(0),
     )?;
 
     let steps: &[(i64, fn(&Connection) -> Result<()>)] = &[
@@ -442,13 +437,35 @@ fn migrate(conn: &Connection) -> Result<()> {
         }),
     ];
 
+    // 逐条判断「这条有没有跑过」，而不是只比 MAX(version)：
+    // 版本号在数组里不是严格递增的（10/11 排在 8/9 前面），只比水位会永久跳过中间漏掉的迁移。
     for (version, step) in steps {
-        if *version > current {
-            step(conn)?;
+        let done = conn
+            .query_row(
+                "SELECT 1 FROM schema_migrations WHERE version = ?1",
+                params![version],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if done {
+            continue;
+        }
+        // 每一步 + 记账放在同一个事务里：中途失败不会留下「跑了但没记」的半截状态
+        conn.execute_batch("BEGIN")?;
+        let result = step(conn).and_then(|_| {
             conn.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                "INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
                 params![version, Utc::now().to_rfc3339()],
             )?;
+            Ok(())
+        });
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(err) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(err);
+            }
         }
     }
     Ok(())
@@ -459,13 +476,15 @@ impl Store {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let conn = Connection::open(path).context("open sqlite")?;
+        let path = path.as_ref().to_path_buf();
+        let conn = Connection::open(&path).context("open sqlite")?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         migrate(&conn)?;
-        let has_fts = conn.execute_batch(FTS_SCHEMA).is_ok();
+        // FTS 只服务旧的 glossary 全文索引；建不出来（无 fts5）不影响功能
+        let _ = conn.execute_batch(FTS_SCHEMA);
         Ok(Self {
             conn: Mutex::new(conn),
-            has_fts,
+            path,
         })
     }
 
@@ -518,9 +537,9 @@ impl Store {
 
     /// 删会话连同它的消息、卡片、升级链接和 cwd 绑定。
     /// 账本条目保留（那是知识，不是会话）；专题只在没有其它会话时清理。
-    pub fn delete_session(&self, id: &str) -> Result<()> {
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
+    /// 删一个会话的所有子行（消息/卡片/遭遇/用量/链接/seeds）；返回它所属专题。
+    /// `delete_session` 和 `delete_topic` 共用这一份，避免两处漏表。
+    fn delete_session_rows(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<Option<String>> {
         let topic_id: Option<String> = tx
             .query_row(
                 "SELECT topic_id FROM sessions WHERE id = ?1",
@@ -557,6 +576,13 @@ impl Store {
             params![id],
         )?;
         tx.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        Ok(topic_id)
+    }
+
+    pub fn delete_session(&self, id: &str) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let topic_id = Self::delete_session_rows(&tx, id)?;
         if let Some(topic_id) = topic_id {
             let remaining: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM sessions WHERE topic_id = ?1",
@@ -908,6 +934,9 @@ impl Store {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let mut doomed = vec![id.to_string()];
+        // visited 用 HashSet：深链/环不会退化成 O(n²)
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        seen.insert(id.to_string());
         let mut cursor = 0;
         while cursor < doomed.len() {
             let parent = doomed[cursor].clone();
@@ -918,13 +947,27 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<String>>>()?;
             drop(stmt);
             for child in children {
-                if !doomed.contains(&child) {
+                if seen.insert(child.clone()) {
                     doomed.push(child);
                 }
             }
         }
         for card_id in &doomed {
+            // 账本条目保留（知识），只把「指向这张卡」的引用清掉，别留悬空 id
             tx.execute("UPDATE encounters SET card_id = NULL WHERE card_id = ?1", params![card_id])?;
+            tx.execute(
+                "UPDATE encounters SET parent_card_id = NULL WHERE parent_card_id = ?1",
+                params![card_id],
+            )?;
+            tx.execute(
+                "UPDATE session_links SET card_id = NULL WHERE card_id = ?1",
+                params![card_id],
+            )?;
+            // session_seeds.card_id 是 NOT NULL：用空串表示来源卡已删（seed 内容还在）
+            tx.execute(
+                "UPDATE session_seeds SET card_id = '' WHERE card_id = ?1",
+                params![card_id],
+            )?;
             tx.execute("DELETE FROM cards WHERE id = ?1", params![card_id])?;
         }
         tx.commit()?;
@@ -944,10 +987,10 @@ impl Store {
         let page_size: i64 = conn
             .query_row("PRAGMA page_size", [], |row| row.get(0))
             .unwrap_or(0);
-        let free_pages: i64 = conn
-            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+        // WAL 里的内容还没并回主库，只看 page_count 会明显偏小
+        let wal_bytes = std::fs::metadata(format!("{}-wal", self.path.display()))
+            .map(|meta| meta.len() as i64)
             .unwrap_or(0);
-        let _ = free_pages;
         Ok(StorageCounts {
             sessions: count("sessions"),
             messages: count("messages"),
@@ -957,7 +1000,7 @@ impl Store {
             turn_usage: count("turn_usage"),
             topics: count("topics"),
             courses: count("courses"),
-            db_bytes: page_count * page_size,
+            db_bytes: page_count * page_size + wal_bytes,
         })
     }
 
@@ -967,9 +1010,11 @@ impl Store {
     /// - 空会话（一条消息都没有）超过 7 天 → 删
     /// - 遭遇记录指向已删会话 → 删；指向已删卡片 → 置空（保留知识）
     /// - 会话链接指向已删会话 → 删
-    /// - token 用量：会话已删或超过 90 天 → 删
+    /// - 卡片指向已删会话 → 连子树一起删（否则永远不出现在任何界面里）
+    /// - 孤儿记录（指向已删卡片的 seeds/links/encounters.parent_card_id）→ 清掉引用
+    /// - token 用量：只删孤儿（活会话的用量是账，不自动过期）
     pub fn maintain(&self, vacuum: bool) -> Result<MaintenanceReport> {
-        let mut conn = self.conn();
+        let conn = self.conn();
         let mut report = MaintenanceReport::default();
 
         report.empty_sessions = conn.execute(
@@ -978,16 +1023,57 @@ impl Store {
                 AND julianday(created_at) < julianday('now', '-7 days')",
             [],
         )?;
+        // 会话已删的卡：子树一起清，避免孤儿卡（先记数，再按根删）
+        let orphan_card_roots: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM cards
+                  WHERE session_id NOT IN (SELECT id FROM sessions)
+                    AND (parent_card_id IS NULL OR parent_card_id NOT IN (SELECT id FROM cards))",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for root in &orphan_card_roots {
+            report.dangling_cards += conn.execute(
+                "DELETE FROM cards
+                  WHERE session_id NOT IN (SELECT id FROM sessions) AND id = ?1",
+                params![root],
+            )?;
+        }
+        // 剩下的是「整棵子树都孤儿」的情况，一并扫掉
+        report.dangling_cards += conn.execute(
+            "DELETE FROM cards WHERE session_id NOT IN (SELECT id FROM sessions)",
+            [],
+        )?;
+
         report.orphan_encounters = conn.execute(
             "DELETE FROM encounters
               WHERE session_id IS NOT NULL
                 AND session_id NOT IN (SELECT id FROM sessions)",
             [],
         )?;
-        report.dangling_cards = conn.execute(
+        // 引用已删卡的记录：清掉指针，保留记录本身（账本是知识，不该跟着卡消失）
+        report.dangling_cards += conn.execute(
             "UPDATE encounters SET card_id = NULL
               WHERE card_id IS NOT NULL
                 AND card_id NOT IN (SELECT id FROM cards)",
+            [],
+        )?;
+        report.dangling_cards += conn.execute(
+            "UPDATE encounters SET parent_card_id = NULL
+              WHERE parent_card_id IS NOT NULL
+                AND parent_card_id NOT IN (SELECT id FROM cards)",
+            [],
+        )?;
+        report.dangling_cards += conn.execute(
+            "UPDATE session_links SET card_id = NULL
+              WHERE card_id IS NOT NULL
+                AND card_id NOT IN (SELECT id FROM cards)",
+            [],
+        )?;
+        report.dangling_cards += conn.execute(
+            "UPDATE session_seeds SET card_id = ''
+              WHERE card_id != '' AND card_id NOT IN (SELECT id FROM cards)",
             [],
         )?;
         report.orphan_links = conn.execute(
@@ -997,9 +1083,7 @@ impl Store {
             [],
         )?;
         report.old_turn_usage = conn.execute(
-            "DELETE FROM turn_usage
-              WHERE session_id NOT IN (SELECT id FROM sessions)
-                 OR julianday(created_at) < julianday('now', '-90 days')",
+            "DELETE FROM turn_usage WHERE session_id NOT IN (SELECT id FROM sessions)",
             [],
         )?;
         // 升级链断掉的卡片：父卡没了，子卡跟着变成根（不然永远藏在树里）
@@ -1988,27 +2072,7 @@ impl Store {
                 params![topic_id],
             )?;
             for session_id in &session_ids {
-                tx.execute(
-                    "DELETE FROM messages WHERE session_id = ?1",
-                    params![session_id],
-                )?;
-                tx.execute(
-                    "DELETE FROM cards WHERE session_id = ?1",
-                    params![session_id],
-                )?;
-                tx.execute(
-                    "DELETE FROM ask_sessions WHERE session_id = ?1",
-                    params![session_id],
-                )?;
-                tx.execute(
-                    "DELETE FROM session_seeds WHERE session_id = ?1",
-                    params![session_id],
-                )?;
-                tx.execute(
-                    "DELETE FROM session_links WHERE parent_session_id = ?1 OR child_session_id = ?1",
-                    params![session_id],
-                )?;
-                tx.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
+                Self::delete_session_rows(&tx, session_id)?;
             }
         } else {
             tx.execute(
@@ -2652,6 +2716,66 @@ fn parse_dt(value: &str) -> DateTime<Utc> {
 mod tests {
     use super::*;
     use studydeck_core::{Anchor, Card, CardId, Course, Encounter, CourseItemStatus, Depth, Message, Topic};
+
+    #[test]
+    fn maintain_cleans_orphans_but_keeps_live_usage() {
+        let path = std::env::temp_dir().join(format!(
+            "studydeck-maintain-{}-{}.db",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let store = Store::open(&path).expect("open store");
+
+        // 活会话 + 一条很旧的用量：不能被当成垃圾删掉
+        let live = store.create_session().expect("session");
+        let message = Message::assistant(&live.id, "一句话定义。");
+        store.add_message(&message).expect("message");
+        store
+            .conn()
+            .execute(
+                "INSERT INTO turn_usage (turn_id, session_id, prompt_tokens, completion_tokens, created_at)
+                 VALUES ('u-old', ?1, 1, 1, '2020-01-01T00:00:00+00:00')",
+                params![live.id.as_str()],
+            )
+            .expect("usage");
+
+        // 会话已经不存在的孤儿卡 + 指向它的遭遇记录
+        store
+            .conn()
+            .execute(
+                "INSERT INTO cards (id, session_id, message_id, char_start, char_end, quote, depth, question, answer, created_at)
+                 VALUES ('orphan-card', 'gone', 'm', 0, 1, 'q', 'can_use', 'q', 'a', '2020-01-01T00:00:00+00:00')",
+                [],
+            )
+            .expect("orphan card");
+        store
+            .conn()
+            .execute(
+                "INSERT INTO encounters (id, entry_id, gist, session_id, card_id, parent_card_id, message_id, char_start, char_end, quote, created_at)
+                 VALUES ('enc1', 'entry-x', 'g', ?1, 'orphan-card', 'orphan-card', 'm', 0, 1, 'q', '2020-01-01T00:00:00+00:00')",
+                params![live.id.as_str()],
+            )
+            .expect("encounter");
+
+        let report = store.maintain(false).expect("maintain");
+        assert!(report.dangling_cards >= 1, "orphan card should be removed");
+        let usage: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM turn_usage WHERE turn_id = 'u-old'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(usage, 1, "live session usage must survive");
+        let cards: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM cards WHERE id = 'orphan-card'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cards, 0);
+        let link: Option<String> = store
+            .conn()
+            .query_row("SELECT card_id FROM encounters WHERE id = 'enc1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(link, None, "encounter is knowledge: keep the row, drop the card link");
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn promote_card_creates_topic_and_is_idempotent() {

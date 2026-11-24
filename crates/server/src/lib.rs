@@ -28,7 +28,7 @@ use serde::Deserialize;
 use serde_json::json;
 use store::Store;
 use studydeck_core::{
-    AgentEvent, Anchor, Card, CardId, CardProfile, Course, CourseItemStatus, Depth, GlossaryEntry,
+    AgentEvent, Anchor, Card, CardId, CardProfile, Course, CourseItemStatus, Depth,
     Mastery,
     Message, MessageStatus, Mode, SessionId, Topic, TopicEdgeKind, TopicNodeStatus, TurnRequest,
     Usage,
@@ -2295,10 +2295,8 @@ struct GlossaryQuery {
 struct GlossaryBody {
     term: String,
     gist: String,
-    depth: Option<String>,
     anchor: Option<Anchor>,
     session_id: Option<String>,
-    mastery: Option<String>,
     profile_id: Option<String>,
     level: Option<String>,
     /// 若是在某张卡上展开的，记下父卡
@@ -2410,11 +2408,19 @@ async fn storage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 }
 
 async fn maintain_storage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.store.maintain(true) {
-        Ok(report) => match state.store.storage_counts() {
-            Ok(counts) => Json(json!({ "ok": true, "report": report, "counts": counts })).into_response(),
-            Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-        },
+    // VACUUM 会长时间持有全局 sqlite 锁：扔到阻塞线程池，别卡住 tokio worker
+    let store = state.store.clone();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let report = store.maintain(true)?;
+        let counts = store.storage_counts()?;
+        Ok((report, counts))
+    })
+    .await;
+    match result {
+        Ok(Ok((report, counts))) => {
+            Json(json!({ "ok": true, "report": report, "counts": counts })).into_response()
+        }
+        Ok(Err(err)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
         Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
