@@ -15,6 +15,8 @@ export interface OpenCardState {
   promotedSessionId: string | null
   /** 嵌套展开时的父卡 id */
   parentCardId: string | null
+  /** 父卡的回答（账本命中卡没有 id，用它给上下文） */
+  parentText: string | null
   rect: { left: number; top: number; width: number; height: number }
   sourceText: string
 }
@@ -184,12 +186,13 @@ export function Card({
   }
 
   const depth = stack.length + 1
-  const visiblePeeks = stack.slice(-3).map((ancestor, index) => ({
+  // 只露最上面 2 层，更多用 +N 表示——堆太厚反而看不清
+  const visiblePeeks = stack.slice(-2).map((ancestor, index) => ({
     ancestor,
-    index: stack.length - Math.min(stack.length, 3) + index,
-    offset: 3 - Math.min(stack.length, 3) + index + 1,
+    index: stack.length - Math.min(stack.length, 2) + index,
+    offset: 2 - Math.min(stack.length, 2) + index + 1,
   }))
-  const hiddenAbove = Math.max(0, stack.length - 3)
+  const hiddenAbove = Math.max(0, stack.length - 2)
 
   return (
     <div
@@ -202,15 +205,16 @@ export function Card({
           key={`${ancestor.id ?? ancestor.anchor.quote}-${index}`}
           className="card-peek"
           style={{
-            transform: `translateY(${-offset * 11}px) rotate(${-offset * 1.6}deg)`,
-            opacity: 0.35 + offset * 0.12,
+            left: 12 + offset * 9,
+            right: 12 + offset * 9,
+            transform: `translateY(${-offset * 11}px)`,
+            opacity: 0.45 + offset * 0.15,
             zIndex: 10 - offset,
           }}
           onClick={() => onPopTo(index)}
           title={t('回到：{text}', { text: ancestor.anchor.quote.slice(0, 40) })}
         >
-          {hiddenAbove > 0 && offset === 3 && <span className="peek-more">+{hiddenAbove}</span>}
-          {ancestor.anchor.quote.slice(0, 16)}
+          {hiddenAbove > 0 && offset === 2 ? `+${hiddenAbove}` : ''}
         </button>
       ))}
 
@@ -295,7 +299,7 @@ export function Card({
 
       <div
         className="card-body"
-        data-card-id={card.id ?? undefined}
+        data-card-id={card.id ?? 'draft'}
         dangerouslySetInnerHTML={{ __html: renderMarkdown(card.answer || (card.streaming ? '…' : '')) }}
       />
 

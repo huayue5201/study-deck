@@ -216,6 +216,8 @@ export interface ChatBody {
   locale?: string
   /** 在上一张卡上展开 */
   parent_card_id?: string
+  /** 父卡的回答文本（父卡没有记录时用） */
+  parent_text?: string
 }
 
 export interface Health {

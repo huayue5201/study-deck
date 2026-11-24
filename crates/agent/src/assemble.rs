@@ -257,8 +257,11 @@ impl ContextAssembler for CardAssembler {
         });
 
         // 嵌套卡：源文本是上一张卡的回答，而不是主线消息
-        let nesting = request.card_history.is_none() && request.parent_card.is_some();
-        let source = if nesting {
+        let nesting = request.card_history.is_none()
+            && (request.parent_card.is_some() || request.nest_source.is_some());
+        let source = if let Some(text) = request.nest_source.clone() {
+            text
+        } else if nesting {
             request
                 .parent_card
                 .as_ref()
@@ -359,6 +362,7 @@ mod tests {
             profile: None,
             level: None,
             locale: None,
+            nest_source: None,
             history: Vec::new(),
         }
     }
@@ -402,6 +406,7 @@ mod tests {
             profile: None,
             level: None,
             locale: None,
+            nest_source: None,
             history: Vec::new(),
         };
         let blocks = CardAssembler::new(None).assemble(&request);
@@ -430,6 +435,7 @@ mod tests {
             profile: None,
             level: None,
             locale: None,
+            nest_source: None,
             history: Vec::new(),
         };
         let blocks = CardAssembler::new(None).assemble(&request);
@@ -490,6 +496,7 @@ mod tests {
             profile: None,
             level: None,
             locale: None,
+            nest_source: None,
             history: Vec::new(),
         };
         let blocks = MainAssembler.assemble(&request);

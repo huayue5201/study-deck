@@ -1603,6 +1603,8 @@ struct TurnSpec {
     level: Option<String>,
     /// 嵌套展开：父卡 id
     nest_from: Option<String>,
+    /// 嵌套展开：父文本（父卡没有记录时用）
+    nest_text: Option<String>,
 }
 
 struct StartedTurn {
@@ -1796,7 +1798,7 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
         text: spec.text.clone(),
         anchor: spec.anchor.clone(),
         depth: spec.depth,
-        parent_card: nest_parent.or(parent_card),
+        parent_card: nest_parent.clone().or(parent_card),
         card_history: spec.card_history,
         topic,
         seed,
@@ -1804,6 +1806,10 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
         profile: resolved_profile,
         level: Some(resolved_level.unwrap_or_default()).filter(|value| !value.is_empty()),
         locale: spec.locale,
+        nest_source: spec
+            .nest_text
+            .clone()
+            .or_else(|| nest_parent.as_ref().map(|card| card.answer.clone())),
         history,
     };
 
@@ -2016,6 +2022,8 @@ struct ChatBody {
     level: Option<String>,
     /// 在哪张卡的文字上展开（嵌套）；不传 = 从主线消息展开
     parent_card_id: Option<String>,
+    /// 父卡的回答文本（账本命中卡没有 card 记录时靠它给上下文）
+    parent_text: Option<String>,
     /// 回答语言（zh/en）
     locale: Option<String>,
 }
@@ -2049,6 +2057,7 @@ async fn chat(State(state): State<Arc<AppState>>, Json(body): Json<ChatBody>) ->
         profile_id: body.profile_id,
         level: body.level,
         nest_from: body.parent_card_id,
+        nest_text: body.parent_text,
         locale: body.locale,
     };
     match begin_turn(&state, spec) {
@@ -2143,6 +2152,7 @@ async fn ask(State(state): State<Arc<AppState>>, Json(body): Json<AskBody>) -> R
         profile_id: None,
         level: None,
         nest_from: None,
+        nest_text: None,
         locale: None,
     };
     match begin_turn(&state, spec) {

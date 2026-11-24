@@ -29,6 +29,8 @@ pub struct TurnRequest {
     pub level: Option<String>,
     /// 回答语言：Some("en") / Some("zh")；None = 跟随默认（中文）。
     pub locale: Option<String>,
+    /// 嵌套展开时的父文本（父卡可能还没落库/是账本命中，没有 card 记录）
+    pub nest_source: Option<String>,
     /// 已经存在的卡片，用于卡片内的追问
     pub parent_card: Option<Card>,
     /// 卡片内此前的追问/回答，用于多轮卡片对话。

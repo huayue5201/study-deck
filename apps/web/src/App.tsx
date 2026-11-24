@@ -692,6 +692,7 @@ export default function App() {
       append = false,
       cardHistory?: string,
       parentCardId?: string | null,
+      parentText?: string | null,
     ) => {
       const sid = sessionRef.current
       if (!sid) return
@@ -724,6 +725,7 @@ export default function App() {
             card_id: existingCardId ?? undefined,
             card_history: cardHistory,
             parent_card_id: parentCardId ?? undefined,
+            parent_text: parentText ?? undefined,
           },
           (frame) => {
             if (frame.type === 'delta') {
@@ -763,6 +765,7 @@ export default function App() {
                   id: matched?.id ?? null,
                   promotedSessionId: matched?.promoted_session_id ?? current.promotedSessionId,
                   parentCardId: current.parentCardId,
+                  parentText: current.parentText,
                 }
               : current,
           )
@@ -863,8 +866,7 @@ export default function App() {
     cardIdRef.current = null
 
     // 嵌套展开：当前卡进栈（先落账，免得切走后丢失）
-    const nestingFrom =
-      fromCardId && card && card.id === fromCardId ? card : null
+    const nestingFrom = fromCardId && card ? card : null
     if (nestingFrom) {
       await saveCard()
       setCardStack((prev) => [...prev, { ...nestingFrom, saved: true }])
@@ -878,6 +880,7 @@ export default function App() {
       sourceText,
       promotedSessionId: null as string | null,
       parentCardId: nestingFrom?.id ?? null,
+      parentText: nestingFrom?.answer ?? null,
     }
 
     // 命中优先：账本里已经有这个词，就先把旧结论摆出来，别再花一次钱
@@ -900,7 +903,17 @@ export default function App() {
 
     const level = resolveLevel(activeProfile)
     setCard({ ...base, level, answer: '', streaming: true, saved: false })
-    void runCard(anchor, level, t('请解释这段内容。'), null, sourceText, false, undefined, base.parentCardId)
+    void runCard(
+      anchor,
+      level,
+      t('请解释这段内容。'),
+      null,
+      sourceText,
+      false,
+      undefined,
+      base.parentCardId,
+      base.parentText,
+    )
   }, [activeProfile, card, pending, runCard, saveCard, t])
 
   const closeCard = useCallback(async () => {
