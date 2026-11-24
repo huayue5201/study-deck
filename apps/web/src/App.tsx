@@ -254,6 +254,24 @@ export default function App() {
     return out
   }, [cards, focusId])
   const card = chain.length > 0 ? chain[chain.length - 1] : null
+
+  /** 当前节点之后的下行路径（上次走过的那条）：面包屑不清空，点一下就能回去 */
+  const descendantPath = useMemo(() => {
+    if (!card) return [] as OpenCardState[]
+    const root = chain[0]?.localId
+    const deepest = root ? rememberedFocusRef.current[root] : null
+    if (!deepest || !cards[deepest]) return [] as OpenCardState[]
+    const path: OpenCardState[] = []
+    let cursor: string | null = deepest
+    const seen = new Set<string>()
+    while (cursor && cards[cursor] && !seen.has(cursor)) {
+      seen.add(cursor)
+      path.unshift(cards[cursor])
+      cursor = cards[cursor].parentLocalId
+    }
+    const at = path.findIndex((node) => node.localId === card.localId)
+    return at >= 0 ? path.slice(at + 1) : []
+  }, [cards, card, chain, focusId])
   const activeIndex = chain.length - 1
 
   /** 当前卡的平级卡片（同一父节点下的其它卡）与已经展开的下一层 */
@@ -336,7 +354,22 @@ export default function App() {
         root = cursor
         cursor = cards[cursor].parentLocalId
       }
-      rememberedFocusRef.current[root] = localId
+      // 只记「更深」的那次：点回祖先时，之前的深层路径还能从面包屑走回去
+      const previous = rememberedFocusRef.current[root]
+      const depthOf = (id: string | undefined) => {
+        let depth = 0
+        let cursor = id ?? null
+        const seen = new Set<string>()
+        while (cursor && cards[cursor] && !seen.has(cursor)) {
+          seen.add(cursor)
+          depth += 1
+          cursor = cards[cursor].parentLocalId
+        }
+        return depth
+      }
+      if (!previous || depthOf(localId) >= depthOf(previous)) {
+        rememberedFocusRef.current[root] = localId
+      }
     },
     [cards],
   )
@@ -1212,7 +1245,8 @@ export default function App() {
 
   // 深度 ≥3 自动钉到右侧，或用户手动钉住
   const [pinned, setPinned] = useState(false)
-  const docked = Boolean(card) && (pinned || chain.length >= 3)
+  // 只有手动钉住才进 dock（不再按层数自动切）
+  const docked = Boolean(card) && pinned
 
   // Esc 关闭卡片由 Card 自己处理（它要先播退场动画），这里只负责取消划词浮层
   useEffect(() => {
@@ -1512,6 +1546,7 @@ export default function App() {
         card={card}
         chain={chain}
         activeIndex={activeIndex}
+        descendantPath={descendantPath}
         siblings={siblings}
         childCards={childCards}
         treeCards={treeCards}

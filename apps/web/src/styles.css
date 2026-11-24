@@ -191,6 +191,13 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
   line-height: 1.5;
 }
 
+/* 当前节点之后的「回程」：点回祖先时，之前的下行路径仍留在这里 */
+.crumb.ahead {
+  color: var(--faint); border-bottom: 1px dashed rgba(225, 180, 106, 0.22);
+  border-radius: 6px 6px 0 0;
+}
+.crumb.ahead:hover { color: var(--text); border-bottom-color: rgba(225, 180, 106, 0.5); }
+
 .crumb-add {
   margin-left: 2px; border: 1px dashed rgba(225, 180, 106, 0.35); background: transparent;
   color: var(--accent); border-radius: 999px; width: 20px; height: 20px; line-height: 1;

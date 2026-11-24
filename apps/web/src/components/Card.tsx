@@ -30,6 +30,8 @@ export interface CardProps {
   /** 整条链：祖先 → 当前 */
   chain: OpenCardState[]
   activeIndex: number
+  /** 当前节点之后、上次走过的下行路径（点回祖先时不清空面包屑） */
+  descendantPath: OpenCardState[]
   /** 同一父节点下的其它卡片（平级） */
   siblings: OpenCardState[]
   /** 当前节点下面已经展开过的卡片（下一层） */
@@ -79,6 +81,7 @@ export function Card({
   card,
   chain,
   activeIndex,
+  descendantPath,
   siblings,
   childCards,
   treeCards,
@@ -578,6 +581,19 @@ export function Card({
             >
               <span className="crumb-num">L{index + 1}</span>
               {labelOf(node, chain.length === 1 ? 80 : 20)}
+            </button>
+          </span>
+        ))}
+        {descendantPath.map((node, index) => (
+          <span key={node.localId} className="crumb-group">
+            <span className="crumb-sep">›</span>
+            <button
+              className="crumb ahead"
+              onClick={() => onFocusNode(node.localId)}
+              title={t('回到「{label}」', { label: labelOf(node, 40) })}
+            >
+              <span className="crumb-num">L{chain.length + index + 1}</span>
+              {labelOf(node, 20)}
             </button>
           </span>
         ))}
