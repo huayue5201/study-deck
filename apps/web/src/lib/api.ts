@@ -248,6 +248,14 @@ export async function updateEntry(
   return data.entry
 }
 
+/** 删除一张卡片及其所有后代（面包屑上的「删除这一层」）。 */
+export async function deleteCard(id: string): Promise<number> {
+  const data = await readJson<{ ok: boolean; removed: number }>(
+    await api(`/api/cards/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  )
+  return data.removed
+}
+
 export async function deleteEntry(id: string): Promise<void> {
   await readJson<{ ok: boolean }>(await api(`/api/glossary/${encodeURIComponent(id)}`, { method: 'DELETE' }))
 }

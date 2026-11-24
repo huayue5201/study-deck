@@ -267,6 +267,10 @@ pub async fn run_with_ready(
         .route("/api/turns/{id}", get(get_turn))
         .route("/api/turns/{id}/events", get(turn_events))
         .route("/api/turns/{id}/cancel", post(cancel_turn))
+        .route(
+            "/api/cards/{id}",
+            axum::routing::delete(delete_card),
+        )
         .route("/api/glossary", get(list_glossary).post(add_glossary))
         .route("/api/glossary/match", get(match_glossary))
         .route("/api/entries/{id}", get(entry_detail))
@@ -2373,6 +2377,20 @@ async fn delete_glossary(
 struct MergeBody {
     target: String,
     sources: Vec<String>,
+}
+
+async fn delete_card(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    match state.store.card_by_id(&id) {
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "卡片不存在").into_response(),
+        Ok(Some(_)) => match state.store.delete_card_tree(&id) {
+            Ok(removed) => Json(json!({ "ok": true, "removed": removed })).into_response(),
+            Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        },
+        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
 }
 
 async fn merge_glossary(

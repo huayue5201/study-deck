@@ -869,6 +869,34 @@ impl Store {
             .optional()?)
     }
 
+    /// 删除一张卡片连同它的所有后代；账本里的遭遇记录保留，但不再指向已删卡片。
+    pub fn delete_card_tree(&self, id: &str) -> Result<usize> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let mut doomed = vec![id.to_string()];
+        let mut cursor = 0;
+        while cursor < doomed.len() {
+            let parent = doomed[cursor].clone();
+            cursor += 1;
+            let mut stmt = tx.prepare("SELECT id FROM cards WHERE parent_card_id = ?1")?;
+            let children = stmt
+                .query_map(params![parent], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            drop(stmt);
+            for child in children {
+                if !doomed.contains(&child) {
+                    doomed.push(child);
+                }
+            }
+        }
+        for card_id in &doomed {
+            tx.execute("UPDATE encounters SET card_id = NULL WHERE card_id = ?1", params![card_id])?;
+            tx.execute("DELETE FROM cards WHERE id = ?1", params![card_id])?;
+        }
+        tx.commit()?;
+        Ok(doomed.len())
+    }
+
     pub fn cards(&self, session_id: &str) -> Result<Vec<Card>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(

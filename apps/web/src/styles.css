@@ -180,7 +180,94 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
 .crumb.home { color: var(--faint); }
 .crumb-num { color: var(--accent); font-size: 9.5px; margin-right: 4px; letter-spacing: 0.04em; }
 .crumb-sep { color: var(--faint); font-size: 10px; }
-.crumb-group { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.crumb-group { position: relative; display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+/* 只有一层时完全不截断：允许换行，别把长标题折成「…」 */
+.card-crumbs.single .crumb {
+  max-width: 100%;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  text-align: left;
+  line-height: 1.5;
+}
+
+.crumb-del {
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  margin-left: -2px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg-faint);
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity .12s ease, color .12s ease, border-color .12s ease;
+}
+
+.crumb-group:hover .crumb-del,
+.crumb-del:focus-visible,
+.crumb-del.active {
+  opacity: 1;
+}
+
+.crumb-del:hover,
+.crumb-del.active {
+  border-color: rgba(224, 122, 95, .55);
+  color: #e07a5f;
+}
+
+/* 删除某一层的二次确认：不用「再点一次」那种盲确认，写清楚要删什么 */
+.crumb-del-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 45;
+  width: max-content;
+  max-width: 300px;
+  padding: 10px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: #241f19;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, .6);
+}
+
+.crumb-del-text {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--fg-1);
+}
+
+.crumb-del-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-top: 9px;
+}
+
+.crumb-del-actions button {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: none;
+  color: var(--fg-2);
+  font-size: 12px;
+}
+
+.crumb-del-actions button.danger {
+  border-color: rgba(224, 122, 95, .5);
+  background: rgba(224, 122, 95, .14);
+  color: #f0a08a;
+}
+
+.crumb-del-actions button:hover {
+  color: var(--fg);
+  border-color: var(--fg-3);
+}
+
 .crumb-add {
   margin-left: 2px; border: 1px dashed rgba(225, 180, 106, 0.35); background: transparent;
   color: var(--accent); border-radius: 999px; width: 20px; height: 20px; line-height: 1;

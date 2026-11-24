@@ -43,6 +43,7 @@ export interface CardProps {
   onSwitchBranch: (parentIndex: number, targetLocalId: string) => void
   /** 在同一处内容上再问一个：新开一条兄弟分支 */
   onBranch: (text: string) => void
+  onDeleteNode: (localId: string) => void
   /** 钉到右侧（dock）/ 恢复浮层 */
   docked: boolean
   onToggleDock: () => void
@@ -86,6 +87,7 @@ export function Card({
   onFocusNode,
   onSwitchBranch,
   onBranch,
+  onDeleteNode,
   docked,
   onToggleDock,
   onBackToMain,
@@ -101,6 +103,7 @@ export function Card({
   const [draft, setDraft] = useState('')
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
   // 「在同一处再问一个」的内联输入
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [branching, setBranching] = useState(false)
   const [branchDraft, setBranchDraft] = useState('')
   const ref = useRef<HTMLDivElement | null>(null)
@@ -354,13 +357,13 @@ export function Card({
   // 入场动画从「被划的那段文字」位置长出来
   const defaultQuestion = t('请解释这段内容。')
   /** 分支标签：优先用「这一支在问什么」，默认问题或空则退回引文 */
-  const labelBase = (node: OpenCardState) => {
+  const labelBase = (node: OpenCardState, limit = 20) => {
     const question = (node.question ?? '').trim()
     const text =
       question && question !== defaultQuestion
         ? question
         : node.anchor.quote.replace(/\s+/g, ' ').trim()
-    return text.length > 20 ? `${text.slice(0, 20)}…` : text
+    return text.length > limit ? `${text.slice(0, limit)}…` : text
   }
   /** 同一个词分出的多支，标签会撞车：给它们编号 1/2、2/2 */
   const labelInfo = useMemo(() => {
@@ -373,11 +376,28 @@ export function Card({
     }
     return { total, ordinal }
   }, [treeCards])
-  const labelOf = (node: OpenCardState) => {
-    const base = labelBase(node)
+  const labelOf = (node: OpenCardState, limit = 20) => {
+    const base = labelBase(node, limit)
     const count = labelInfo.total.get(base) ?? 1
     return count > 1 ? `${base} ${labelInfo.ordinal.get(node.localId)}/${count}` : base
   }
+  /** 某一层下面一共有多少后代（删除确认时要说清楚会连带删掉多少） */
+  const descendantCount = (localId: string) => {
+    let count = 0
+    let frontier = [localId]
+    while (frontier.length) {
+      const next: string[] = []
+      for (const node of treeCards) {
+        if (node.parentLocalId && frontier.includes(node.parentLocalId)) {
+          next.push(node.localId)
+          count += 1
+        }
+      }
+      frontier = next
+    }
+    return count
+  }
+
   const gistOf = (node: OpenCardState) =>
     stripMarkdown(node.answer).replace(/\s+/g, ' ').trim().slice(0, 64)
 
@@ -531,7 +551,10 @@ export function Card({
         </button>
       </header>
 
-      <nav className="card-crumbs" aria-label={t('卡片链')}>
+      <nav
+        className={`card-crumbs${chain.length === 1 ? ' single' : ''}`}
+        aria-label={t('卡片链')}
+      >
         <button className="crumb home" onClick={onBackToMain}>
           {t('主线')}
         </button>
@@ -560,8 +583,47 @@ export function Card({
                 title={`${node.anchor.quote}\n${node.question}`}
               >
                 <span className="crumb-num">L{index + 1}</span>
-                {labelOf(node)}
+                {labelOf(node, chain.length === 1 ? 80 : 20)}
               </button>
+              <button
+                className={`crumb-del${confirmDelete === node.localId ? ' active' : ''}`}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  setConfirmDelete(confirmDelete === node.localId ? null : node.localId)
+                }}
+                title={t('删除这一层')}
+                aria-label={t('删除这一层')}
+              >
+                ×
+              </button>
+              {confirmDelete === node.localId && (
+                <div
+                  className="crumb-del-pop"
+                  onClick={(event) => event.stopPropagation()}
+                  role="dialog"
+                >
+                  <div className="crumb-del-text">
+                    {descendantCount(node.localId) > 0
+                      ? t('删除「{label}」及它下面的 {n} 层？', {
+                          label: labelOf(node),
+                          n: descendantCount(node.localId),
+                        })
+                      : t('删除「{label}」？', { label: labelOf(node) })}
+                  </div>
+                  <div className="crumb-del-actions">
+                    <button
+                      className="danger"
+                      onClick={() => {
+                        setConfirmDelete(null)
+                        onDeleteNode(node.localId)
+                      }}
+                    >
+                      {t('删除')}
+                    </button>
+                    <button onClick={() => setConfirmDelete(null)}>{t('取消')}</button>
+                  </div>
+                </div>
+              )}
               {forked && (
                 <button
                   className={`crumb-caret${open ? ' open' : ''}`}
