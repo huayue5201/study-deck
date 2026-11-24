@@ -188,7 +188,6 @@ export default function App() {
     setCards({})
     setFocusId(null)
     rememberedFocusRef.current = {}
-    // 冷启动也要有账本缓存，否则同锚点复用永远不命中，每次重开都白花一次模型调用
     if (!sessionId) {
       sessionCardsRef.current = []
       return
@@ -196,7 +195,44 @@ export default function App() {
     let alive = true
     void fetchSession(sessionId)
       .then((view) => {
-        if (alive) sessionCardsRef.current = view.cards
+        if (!alive) return
+        // 冷启动也要有账本缓存，否则同锚点复用永远不命中，每次重开都白花一次模型调用
+        sessionCardsRef.current = view.cards
+        // 会话里已有的卡片直接铺进树：不然「同层/下一层」要等你一层层走一遍才出现，
+        // 重新打开一张旧卡时侧栏永远是空的
+        setCards((prev) => {
+          const next: Record<string, OpenCardState> = { ...prev }
+          for (const record of view.cards) {
+            const base: OpenCardState = {
+              localId: record.id,
+              id: record.id,
+              anchor: record.anchor,
+              level: record.level ?? '',
+              question: record.question,
+              answer: record.answer,
+              streaming: false,
+              saved: false,
+              promotedSessionId: record.promoted_session_id ?? null,
+              parentCardId: record.parent_card_id ?? null,
+              parentLocalId: record.parent_card_id ?? null,
+              parentText: null,
+              rect: { left: 0, top: 0, width: 0, height: 0 },
+              sourceText: '',
+            }
+            // 本地正在流式的节点优先：别用库里的半截答案盖掉
+            const local = next[record.id]
+            next[record.id] = local ? { ...base, ...local, id: record.id, localId: record.id } : base
+          }
+          // 父卡在本地先出现时，子卡记的是 parentLocalId；父卡落库后改回真实 id
+          const realIdOf = (key: string | null) => (key && next[key]?.id ? next[key].id! : key)
+          for (const [key, node] of Object.entries(next)) {
+            const parentLocalId = realIdOf(node.parentLocalId)
+            if (parentLocalId !== node.parentLocalId) {
+              next[key] = { ...node, parentLocalId, parentCardId: parentLocalId }
+            }
+          }
+          return next
+        })
       })
       .catch(() => {})
     return () => {
@@ -220,19 +256,21 @@ export default function App() {
   const card = chain.length > 0 ? chain[chain.length - 1] : null
   const activeIndex = chain.length - 1
 
-  /** 每层「往下走」的其它选择（= 分支）。分支就是树的子节点，不需要另存快照 */
-  const branchLists = useMemo(() => {
-    const byParent = new Map<string | null, OpenCardState[]>()
-    for (const node of Object.values(cards)) {
-      const list = byParent.get(node.parentLocalId) ?? []
-      list.push(node)
-      byParent.set(node.parentLocalId, list)
-    }
-    return chain.map((node, index) => {
-      const next = chain[index + 1]
-      return (byParent.get(node.localId) ?? []).filter((item) => item.localId !== next?.localId)
-    })
-  }, [cards, chain])
+  /** 当前卡的平级卡片（同一父节点下的其它卡）与已经展开的下一层 */
+  const siblings = useMemo(
+    () =>
+      card
+        ? Object.values(cards).filter(
+            (item) =>
+              item.parentLocalId === card.parentLocalId && item.localId !== card.localId,
+          )
+        : [],
+    [cards, card],
+  )
+  const childCards = useMemo(
+    () => (card ? Object.values(cards).filter((item) => item.parentLocalId === card.localId) : []),
+    [cards, card],
+  )
 
   // 同一处划词的其它根卡（第 1 层的「分支」没有父节点可挂，单独列出来）
   const treeCards = useMemo(() => Object.values(cards), [cards])
@@ -243,14 +281,6 @@ export default function App() {
     }
     return [...counts.values()].some((count) => count > 1)
   }, [treeCards])
-  const rootBranches = useMemo(
-    () =>
-      Object.values(cards).filter(
-        (item) => item.parentLocalId === null && item.localId !== chain[0]?.localId,
-      ),
-    [cards, chain],
-  )
-
   const addCard = useCallback((node: OpenCardState) => {
     setCards((prev) => ({ ...prev, [node.localId]: node }))
   }, [])
@@ -279,8 +309,10 @@ export default function App() {
         changed = true
       }
       for (const [key, node] of Object.entries(next)) {
-        if (node.parentLocalId === localId && node.parentCardId !== realId) {
-          next[key] = { ...node, parentCardId: realId }
+        // 父卡拿到真实 id 后，子卡的 parentLocalId 也跟着换成真实 id：
+        // 打开旧卡时才能用 parent_card_id 直接接上树
+        if (node.parentLocalId === localId) {
+          next[key] = { ...node, parentLocalId: realId, parentCardId: realId }
           changed = true
         }
       }
@@ -989,17 +1021,6 @@ export default function App() {
     }
   }, [activeProfile, card, glossaryOpen, query, refreshGlossary])
 
-  /** 在「某个祖先」的多个分支之间切换 */
-  /** 在某个祖先的多个分支之间切换（分支 = 兄弟节点，切过去就是聚焦它上次的位置） */
-  const switchBranch = useCallback(
-    (parentIndex: number, targetLocalId: string) => {
-      const list = parentIndex < 0 ? rootBranches : branchLists[parentIndex]
-      if (!list?.some((item) => item.localId === targetLocalId)) return
-      focusOn(rememberedFocusRef.current[targetLocalId] ?? targetLocalId)
-    },
-    [branchLists, focusOn, rootBranches],
-  )
-
   /** 在同一处内容上再问一个：在当前卡的父节点下新开一条兄弟分支 */
   const branchFrom = useCallback(
     (text: string) => {
@@ -1491,14 +1512,14 @@ export default function App() {
         card={card}
         chain={chain}
         activeIndex={activeIndex}
-        branchLists={branchLists}
+        siblings={siblings}
+        childCards={childCards}
         treeCards={treeCards}
         onFocusNode={focusOn}
         docked={docked}
         profile={activeProfile}
         onClose={() => void closeCard()}
         onJump={(index) => void jumpToLayer(index)}
-        onSwitchBranch={switchBranch}
         onToggleDock={() => setPinned((value) => !value)}
         onBranch={branchFrom}
         onBackToMain={() => void backToMain()}

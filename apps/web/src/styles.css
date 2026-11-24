@@ -199,45 +199,54 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
 .crumb-add:hover, .crumb-add.active { background: rgba(225, 180, 106, 0.14); border-style: solid; }
 .crumb-add:disabled { opacity: 0.4; cursor: default; }
 
-/* 分叉标记：只在真有兄弟的那一层出现，点开是局部弹层（不展开整棵树） */
-.card-crumbs { position: relative; }
-.crumb-caret {
-  border: 1px solid rgba(225, 180, 106, 0.28); background: rgba(225, 180, 106, 0.07);
-  color: var(--accent); border-radius: 999px; font-size: 10px; padding: 0 6px;
-  height: 18px; line-height: 16px; cursor: pointer; flex: 0 0 auto;
+/* 侧边 rail：把「树关系」从面包屑里拿出来——面包屑只回答「我在哪条路径上」，
+   同层还有谁、下一层有什么，放卡片旁边，不挤占路径 */
+.card-side {
+  position: absolute; top: 54px; z-index: 22;
+  display: flex; flex-direction: column; gap: 6px;
+  width: 34px; max-height: calc(100% - 66px);
+  padding: 3px; border-radius: 12px;
+  pointer-events: auto;
+  overflow-x: hidden; overflow-y: auto; scrollbar-width: none;
+  transition: width 0.18s cubic-bezier(0.22, 0.9, 0.3, 1);
 }
-.crumb-caret:hover, .crumb-caret.open { background: rgba(225, 180, 106, 0.18); border-color: rgba(225, 180, 106, 0.55); }
-.crumb-pop {
-  position: absolute; z-index: 40; top: calc(100% + 4px); left: 12px; right: 12px;
-  max-width: 420px; padding: 6px; border-radius: 10px;
-  background: #262119; border: 1px solid var(--line-strong);
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+.card-side::-webkit-scrollbar { display: none; }
+.card-side.side-right { left: calc(100% + 6px); }
+.card-side.side-left { right: calc(100% + 6px); }
+.card-side.side-overlay {
+  right: 6px; top: auto; bottom: 54px; max-height: 52%;
+  background: rgba(24, 20, 16, 0.92); border: 1px solid var(--line);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
 }
-.crumb-pop-head {
-  font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
-  color: var(--faint); padding: 3px 7px 6px;
+.card-side:hover { width: 176px; }
+.side-group { display: flex; flex-direction: column; gap: 3px; }
+.side-head {
+  font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--faint); padding: 0 6px 2px; white-space: nowrap;
+  opacity: 0; transition: opacity 0.15s;
 }
-.crumb-pop-row {
-  display: flex; gap: 8px; width: 100%; text-align: left; align-items: flex-start;
-  border: 0; background: transparent; border-radius: 7px; padding: 6px 7px; cursor: pointer;
+.card-side:hover .side-head { opacity: 1; }
+.side-item {
+  display: flex; align-items: center; gap: 7px; flex: 0 0 auto;
+  height: 26px; padding: 0 3px;
+  border: 1px solid transparent; border-radius: 8px;
+  background: rgba(30, 26, 20, 0.72);
+  color: var(--muted); font-size: 11.5px; text-align: left;
+  cursor: pointer; overflow: hidden;
 }
-.crumb-pop-row.cursor { background: rgba(255, 255, 255, 0.05); }
-.crumb-pop-row.current { background: rgba(225, 180, 106, 0.09); }
-.crumb-pop-dot {
-  flex: 0 0 auto; width: 5px; height: 5px; border-radius: 50%;
-  background: var(--faint); margin-top: 6px;
+.side-item:hover { border-color: var(--line-strong); color: var(--text); background: rgba(38, 33, 25, 0.92); }
+.side-item.streaming { border-color: rgba(200, 90, 70, 0.4); }
+.side-avatar {
+  flex: 0 0 18px; width: 18px; height: 18px; border-radius: 5px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; color: var(--accent); background: rgba(225, 180, 106, 0.1);
 }
-.crumb-pop-row.current .crumb-pop-dot { background: var(--accent); }
-.crumb-pop-dot.streaming { background: var(--warn); }
-.crumb-pop-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.crumb-pop-label {
-  font-size: 11.5px; color: var(--text);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 370px;
+.side-item.streaming .side-avatar { color: var(--warn); background: rgba(200, 90, 70, 0.14); }
+.side-label {
+  display: none; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.crumb-pop-gist {
-  font-size: 10.5px; color: var(--faint); line-height: 1.5;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 370px;
-}
+.card-side:hover .side-label { display: block; }
 
 /* 从这一层再问一个（新分支） */
 .card-branch-ask {
