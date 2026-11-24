@@ -145,7 +145,7 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
   overflow: hidden; text-align: left;
   transform-origin: 50% 50%;
   transform:
-    translate(calc(var(--d) * 17px), calc(var(--d) * -14px))
+    translate(calc(var(--d) * 26px), calc(var(--d) * -22px))
     rotate(calc(var(--d) * 1.8deg))
     scale(calc(1 - var(--d) * 0.008));
   box-shadow: 0 16px 38px rgba(0, 0, 0, 0.5);
@@ -179,6 +179,38 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
 }
 .card-deck.deck-collapsed .card-cover { opacity: 0; pointer-events: none; }
 
+/* 前进方向：退下来时让出的更深层卡片，镜像到右侧 */
+.card-cover.forward {
+  transform-origin: 50% 50%;
+  transform:
+    translate(calc(var(--d) * -17px), calc(var(--d) * -14px))
+    rotate(calc(var(--d) * -1.8deg));
+  opacity: 0.62;
+}
+.card-deck.deck-fan .card-cover.forward {
+  inset: auto; left: auto; right: 54px; top: 18px; width: 380px; height: 232px;
+  transform-origin: right center;
+  transform:
+    translateX(calc(var(--d) * 118px))
+    translateZ(calc(var(--d) * -140px))
+    rotateY(-30deg)
+    scale(calc(1 - var(--d) * 0.05));
+}
+.card-deck.deck-fan .card-cover.forward:hover {
+  border-color: rgba(225, 180, 106, 0.65);
+  transform:
+    translateX(calc(var(--d) * 118px))
+    translateZ(calc(var(--d) * -140px + 70px))
+    rotateY(-24deg)
+    scale(calc(1 - var(--d) * 0.04));
+}
+.card-forward {
+  font-size: 10px; color: var(--accent); letter-spacing: 0.04em;
+  border: 1px solid rgba(225, 180, 106, 0.35); border-radius: 999px;
+  padding: 1px 8px; background: transparent; cursor: pointer; flex: 0 0 auto;
+}
+.card-forward:hover { background: rgba(225, 180, 106, 0.1); }
+
 /* 掀开热区：牌堆右上角那块被压住的边 */
 .pile-hotspot {
   position: absolute; right: -46px; top: -40px; width: 108px; height: 96px;
@@ -191,13 +223,18 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
 }
 
 .cover-head {
-  position: absolute; top: 10px; right: 12px;
+  position: absolute; top: 4px; right: 8px;
   display: flex; align-items: center; gap: 6px;
 }
+/* 静止态：右上角一直露出「层号 + 引文」，不用掀开也知道下面压着什么 */
+.cover-tab {
+  font-size: 10px; color: var(--muted);
+  max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .cover-level {
-  font-size: 10px; color: var(--faint); letter-spacing: 0.08em;
-  border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px;
-  background: rgba(20, 18, 15, 0.9);
+  font-size: 9.5px; color: var(--accent); letter-spacing: 0.06em;
+  border: 1px solid rgba(225, 180, 106, 0.3); border-radius: 999px; padding: 0 6px;
+  background: rgba(20, 18, 15, 0.95);
 }
 .cover-more { font-size: 10px; color: var(--accent); }
 .cover-quote {
@@ -990,7 +1027,7 @@ button.danger { color: #e6a49b; border-color: rgba(217, 141, 130, 0.35); }
 /* ---------- card ---------- */
 
 .card {
-  width: 510px; border-radius: 16px; border-color: var(--line-strong);
+  width: 510px; height: min(66vh, 600px); border-radius: 16px; border-color: var(--line-strong);
   background: linear-gradient(180deg, #221e18, #1a1713);
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }

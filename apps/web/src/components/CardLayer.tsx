@@ -4,9 +4,11 @@ import { Card, type OpenCardState } from './Card'
 interface Props {
   card: OpenCardState | null
   stack: OpenCardState[]
+  forward: OpenCardState[]
   profile: CardProfile
   onClose: () => void
   onPopTo: (index: number) => void
+  onForward: () => void
   onBackToMain: () => void
   onSelectInCard: () => void
   onDepthChange: (level: string) => void
@@ -20,9 +22,11 @@ interface Props {
 export function CardLayer({
   card,
   stack,
+  forward,
   profile,
   onClose,
   onPopTo,
+  onForward,
   onBackToMain,
   onSelectInCard,
   onDepthChange,
@@ -38,9 +42,11 @@ export function CardLayer({
       <Card
         card={card}
         stack={stack}
+        forward={forward}
         profile={profile}
         onClose={onClose}
         onPopTo={onPopTo}
+        onForward={onForward}
         onBackToMain={onBackToMain}
         onSelectInCard={onSelectInCard}
         onDepthChange={onDepthChange}

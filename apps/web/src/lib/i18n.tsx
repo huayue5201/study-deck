@@ -350,6 +350,9 @@ const EN: Record<string, string> = {
   '展开卡片堆（{n} 层）': 'Fan out the stack ({n} cards)',
   '卡片堆（{n} 层）': 'Card stack ({n})',
   '掀开卡片堆': 'Fan out the pile',
+  '前进 {n}': 'Forward {n}',
+  '前进：回到刚才退下来的卡': 'Forward: reopen the card you came back from',
+  '前进到：{text}': 'Forward to: {text}',
 }
 
 function interpolate(text: string, vars?: Record<string, string | number>): string {

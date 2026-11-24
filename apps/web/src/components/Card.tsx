@@ -25,10 +25,14 @@ interface Props {
   card: OpenCardState
   /** 祖先卡片（栈底在前），用于扇形叠放与面包屑 */
   stack: OpenCardState[]
+  /** 回退时让出位置的更深层卡片（可以再前进回去） */
+  forward: OpenCardState[]
   profile: CardProfile
   onClose: () => void
   /** 回到第 index 个祖先（0 = 最外层） */
   onPopTo: (index: number) => void
+  /** 前进到退下来时被让出的那张卡 */
+  onForward: () => void
   onBackToMain: () => void
   /** 在卡片正文里划词，准备嵌套展开 */
   onSelectInCard: () => void
@@ -60,9 +64,11 @@ function clampToViewport(
 export function Card({
   card,
   stack,
+  forward,
   profile,
   onClose,
   onPopTo,
+  onForward,
   onBackToMain,
   onSelectInCard,
   onDepthChange,
@@ -77,8 +83,6 @@ export function Card({
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
   // 卡片堆开合（Cover Flow）
   const [deckOpen, setDeckOpen] = useState(false)
-  const lastHeight = useRef(0)
-  const lastHeightAt = useRef(0)
   const ref = useRef<HTMLDivElement | null>(null)
   const drag = useRef<{ dx: number; dy: number } | null>(null)
 
@@ -137,25 +141,6 @@ export function Card({
     const observer = new ResizeObserver(() => {
       const width = el.offsetWidth
       const height = el.offsetHeight
-      // 流式输出让卡片一节一节变高；补一段 180ms 的高度动画，
-      // 避免每次换行/新一段都"跳"一下。
-      const now = performance.now()
-      if (
-        lastHeight.current > 0 &&
-        Math.abs(height - lastHeight.current) > 8 &&
-        now - lastHeightAt.current > 160
-      ) {
-        lastHeightAt.current = now
-        try {
-          el.animate(
-            [{ height: `${lastHeight.current}px` }, { height: `${height}px` }],
-            { duration: 180, easing: 'cubic-bezier(.2,.9,.3,1)' },
-          )
-        } catch {
-          // 老 WebView 不支持 WAAPI 就算了，不影响功能
-        }
-      }
-      lastHeight.current = height
       setPos((current) => {
         if (!current) return current
         const next = clampToViewport(current.left, current.top, width, height)
@@ -165,6 +150,14 @@ export function Card({
     observer.observe(el)
     return () => observer.disconnect()
   }, [])
+
+  // 固定高度后，正文在卡片内部滚动；流式输出时自动跟到底
+  const bodyRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const el = bodyRef.current
+    if (!el || !card.streaming) return
+    el.scrollTop = el.scrollHeight
+  }, [card.answer, card.streaming])
 
   // 卡片打开时，1–9 直接切档；输入框 / 文本域里不抢数字键。
   useEffect(() => {
@@ -235,6 +228,23 @@ export function Card({
       onWheel={(event) => event.stopPropagation()}
     >
       <div className={`card-deck ${deckOpen ? 'deck-fan' : ''}`}>
+        {forward.map((item, index) => (
+          <button
+            key={`fwd-${item.id ?? item.anchor.quote}-${index}`}
+            className="card-cover forward"
+            style={{ '--d': index + 1 } as React.CSSProperties}
+            onClick={onForward}
+            title={t('前进到：{text}', { text: item.anchor.quote.slice(0, 40) })}
+          >
+            <span className="cover-head">
+              <span className="cover-level">{t('第 {n} 层', { n: stack.length + 2 + index })}</span>
+            </span>
+            <span className="cover-quote">{item.anchor.quote.slice(0, 42)}</span>
+            <span className="cover-gist">
+              {item.answer.replace(/[#*>`_~\-]/g, ' ').replace(/\s+/g, ' ').slice(0, 110)}
+            </span>
+          </button>
+        ))}
         {stack.length > 0 && (
           <div
             className="pile-hotspot"
@@ -252,7 +262,8 @@ export function Card({
             title={t('回到：{text}', { text: ancestor.anchor.quote.slice(0, 40) })}
           >
             <span className="cover-head">
-              <span className="cover-level">{t('第 {n} 层', { n: index + 1 })}</span>
+              <span className="cover-level">L{index + 1}</span>
+              <span className="cover-tab">{ancestor.anchor.quote.slice(0, 8)}</span>
               {hiddenCovers > 0 && index === 0 && (
                 <span className="cover-more">+{hiddenCovers}</span>
               )}
@@ -295,6 +306,15 @@ export function Card({
         >
           {t('第 {n} 层', { n: depth })}
         </button>
+        {forward.length > 0 && (
+          <button
+            className="card-forward"
+            onClick={onForward}
+            title={t('前进：回到刚才退下来的卡')}
+          >
+            {t('前进 {n}', { n: forward.length })}
+          </button>
+        )}
         <button className="icon" onClick={onClose} title={t('关闭整叠（Esc）')}>
           ×
         </button>
@@ -356,6 +376,7 @@ export function Card({
 
       <div
         className="card-body"
+        ref={bodyRef}
         data-card-id={card.id ?? 'draft'}
         dangerouslySetInnerHTML={{ __html: renderMarkdown(card.answer || (card.streaming ? '…' : '')) }}
       />
