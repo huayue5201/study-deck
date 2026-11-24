@@ -206,54 +206,54 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
 .crumb-add:hover, .crumb-add.active { background: rgba(225, 180, 106, 0.14); border-style: solid; }
 .crumb-add:disabled { opacity: 0.4; cursor: default; }
 
-/* 侧边 rail：把「树关系」从面包屑里拿出来——面包屑只回答「我在哪条路径上」，
-   同层还有谁、下一层有什么，放卡片旁边，不挤占路径 */
+/* 侧边 rail：面包屑只回答「我在哪条路径上」，同层/下层放卡片左侧。
+   收起时每层一颗「L2 ⊕2」这样的胶囊，悬停才展开成条目列表 */
 .card-side {
-  position: absolute; top: 54px; z-index: 22;
-  display: flex; flex-direction: column; gap: 6px;
-  width: 34px; max-height: calc(100% - 66px);
-  padding: 3px; border-radius: 12px;
-  pointer-events: auto;
-  overflow-x: hidden; overflow-y: auto; scrollbar-width: none;
-  transition: width 0.18s cubic-bezier(0.22, 0.9, 0.3, 1);
+  position: absolute; top: 0; z-index: 22;
+  display: flex; flex-direction: column; gap: 4px;
+  width: 54px; max-height: 100%;
+  padding: 2px; pointer-events: auto;
+  overflow: hidden auto; scrollbar-width: thin;
+  transition: width 0.18s ease;
 }
-.card-side::-webkit-scrollbar { display: none; }
-.card-side.side-right { left: calc(100% + 6px); }
-.card-side.side-left { right: calc(100% + 6px); }
+.card-side.side-left { right: calc(100% + 10px); align-items: flex-end; }
+.card-side.side-right { left: calc(100% + 6px); align-items: flex-start; }
 .card-side.side-overlay {
-  right: 6px; top: auto; bottom: 54px; max-height: 52%;
-  background: rgba(24, 20, 16, 0.92); border: 1px solid var(--line);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+  right: 6px; left: auto; top: auto; bottom: 54px; max-height: 55%;
+  background: rgba(20, 17, 13, 0.94); border: 1px solid var(--line);
+  border-radius: 12px; box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
 }
-.card-side:hover { width: 176px; }
-.side-group { display: flex; flex-direction: column; gap: 3px; }
+.card-side:hover { width: 208px; }
+
+.side-group { display: flex; flex-direction: column; gap: 3px; width: 100%; align-items: stretch; }
+.card-side:not(:hover) .side-head { justify-content: space-between; gap: 2px; }
 .side-head {
-  font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase;
-  color: var(--faint); padding: 0 6px 2px; white-space: nowrap;
-  opacity: 0; transition: opacity 0.15s;
+  display: flex; align-items: center; gap: 5px;
+  padding: 6px 8px; border-radius: 9px;
+  background: rgba(24, 21, 18, 0.86); border: 1px solid var(--line);
+  color: var(--muted); font-size: 10px; cursor: default;
 }
-.card-side:hover .side-head { opacity: 1; }
+.side-num { font-size: 9.5px; color: var(--accent); letter-spacing: 0.05em; flex: 0 0 auto; }
+/* 收起时只留「L2 ⊕1」：层级 + 数量，剩下的靠悬停展开 */
+.side-tag { display: none; font-size: 9.5px; color: var(--faint); white-space: nowrap; }
+.card-side:hover .side-tag { display: inline; }
+.side-count {
+  margin-left: auto; font-size: 9px; color: var(--faint);
+  border: 1px solid var(--line); border-radius: 999px; padding: 0 4px;
+}
+.side-rows { display: none; flex-direction: column; gap: 3px; }
+.card-side:hover .side-rows { display: flex; }
 .side-item {
-  display: flex; align-items: center; gap: 7px; flex: 0 0 auto;
-  height: 26px; padding: 0 3px;
-  border: 1px solid transparent; border-radius: 8px;
-  background: rgba(30, 26, 20, 0.72);
-  color: var(--muted); font-size: 11.5px; text-align: left;
-  cursor: pointer; overflow: hidden;
+  display: flex; align-items: center; gap: 6px;
+  overflow: hidden; padding: 6px 8px; border-radius: 9px;
+  background: rgba(24, 21, 18, 0.86); border: 1px solid var(--line);
+  color: var(--muted); font-size: 11px; text-align: left; cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
 }
-.side-item:hover { border-color: var(--line-strong); color: var(--text); background: rgba(38, 33, 25, 0.92); }
-.side-item.streaming { border-color: rgba(200, 90, 70, 0.4); }
-.side-avatar {
-  flex: 0 0 18px; width: 18px; height: 18px; border-radius: 5px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 10px; color: var(--accent); background: rgba(225, 180, 106, 0.1);
-}
-.side-item.streaming .side-avatar { color: var(--warn); background: rgba(200, 90, 70, 0.14); }
-.side-label {
-  display: none; min-width: 0;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.card-side:hover .side-label { display: block; }
+.side-item:hover { color: var(--text); border-color: var(--line-strong); background: rgba(32, 28, 22, 0.92); }
+.side-item.streaming { border-color: rgba(200, 90, 70, 0.45); }
+.side-idx { font-size: 9.5px; color: var(--accent); flex: 0 0 auto; letter-spacing: 0.04em; }
+.side-quote { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 从这一层再问一个（新分支） */
 .card-branch-ask {

@@ -422,11 +422,11 @@ export function Card({
 
   /** 侧边 rail 放哪边：优先右侧，右侧不够放左侧，两侧都窄就叠在卡内 */
   const railSide = !pos
-    ? 'right'
-    : viewport.w - (pos.left + cardWidth) >= 52
-      ? 'right'
-      : pos.left >= 52
-        ? 'left'
+    ? 'left'
+    : pos.left >= 60
+      ? 'left'
+      : viewport.w - (pos.left + cardWidth) >= 60
+        ? 'right'
         : 'overlay'
 
   const enterOrigin = pos
@@ -472,38 +472,46 @@ export function Card({
         <aside className={`card-side side-${railSide}`} aria-label={t('同层与下一层')}>
           {siblings.length > 0 && (
             <div className="side-group">
-              <span className="side-head">
-                {t('同层')} · {siblings.length + 1}
-              </span>
-              {siblings.map((node) => (
-                <button
-                  key={node.localId}
-                  className={`side-item${node.streaming ? ' streaming' : ''}`}
-                  onClick={() => onFocusNode(node.localId)}
-                  title={`${node.question === defaultQuestion ? node.anchor.quote : node.question}\n${labelOf(node, 40)}`}
-                >
-                  <span className="side-avatar">{labelOf(node).slice(0, 1)}</span>
-                  <span className="side-label">{labelOf(node, 26)}</span>
-                </button>
-              ))}
+              <div className="side-head">
+                <span className="side-num">L{activeIndex + 1}</span>
+                <span className="side-tag">{t('同层')}</span>
+                <span className="side-count">{siblings.length + 1}</span>
+              </div>
+              <div className="side-rows">
+                {siblings.map((node, index) => (
+                  <button
+                    key={node.localId}
+                    className={`side-item${node.streaming ? ' streaming' : ''}`}
+                    onClick={() => onFocusNode(node.localId)}
+                    title={`${node.question === defaultQuestion ? node.anchor.quote : node.question}\n${node.anchor.quote}`}
+                  >
+                    <span className="side-idx">{activeIndex + 1}.{index + 1}</span>
+                    <span className="side-quote">{node.anchor.quote.replace(/\s+/g, ' ')}</span>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
           {childCards.length > 0 && (
             <div className="side-group">
-              <span className="side-head">
-                {t('下一层')} · {childCards.length}
-              </span>
-              {childCards.map((node) => (
-                <button
-                  key={node.localId}
-                  className={`side-item${node.streaming ? ' streaming' : ''}`}
-                  onClick={() => onFocusNode(node.localId)}
-                  title={`${node.anchor.quote}\n${labelOf(node, 40)}`}
-                >
-                  <span className="side-avatar">{labelOf(node).slice(0, 1)}</span>
-                  <span className="side-label">{labelOf(node, 26)}</span>
-                </button>
-              ))}
+              <div className="side-head">
+                <span className="side-num">L{activeIndex + 2}</span>
+                <span className="side-tag">{t('下一层')}</span>
+                <span className="side-count">{childCards.length}</span>
+              </div>
+              <div className="side-rows">
+                {childCards.map((node, index) => (
+                  <button
+                    key={node.localId}
+                    className={`side-item${node.streaming ? ' streaming' : ''}`}
+                    onClick={() => onFocusNode(node.localId)}
+                    title={node.anchor.quote}
+                  >
+                    <span className="side-idx">{activeIndex + 2}.{index + 1}</span>
+                    <span className="side-quote">{node.anchor.quote.replace(/\s+/g, ' ')}</span>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </aside>
