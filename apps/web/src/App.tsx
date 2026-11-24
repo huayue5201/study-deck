@@ -191,6 +191,15 @@ export default function App() {
     setCards({})
     setFocusId(null)
     rememberedFocusRef.current = {}
+    if (sessionId) {
+      try {
+        const raw = localStorage.getItem(`studydeck.focus.${sessionId}`)
+        const stored = raw ? (JSON.parse(raw) as Record<string, string>) : null
+        if (stored && typeof stored === 'object') rememberedFocusRef.current = stored
+      } catch {
+        // 坏数据直接丢掉
+      }
+    }
     if (!sessionId) {
       sessionCardsRef.current = []
       return
@@ -262,7 +271,7 @@ export default function App() {
    * 当前节点之后的下行路径。两条来源，缺一不可：
    * 1) 上次走过的那条（点回祖先时，刚刚的路径不能凭空消失）；
    * 2) 没走过时，沿「唯一子卡」往下补（只有一个去处 = 没有歧义，直接摆出来）。
-   * 有多个去处时留空，交给侧 rail 让用户选。
+   * 多个去处时只接上「探得最深」的一支，其余在下一层的 rail「同层」里。
    */
   const descendantPath = useMemo(() => {
     if (!card) return [] as OpenCardState[]
@@ -286,6 +295,23 @@ export default function App() {
           out.push(node)
           seen.add(node.localId)
         }
+      }
+    }
+
+    // 没走过、又有多个子卡时：先接上「探得最深」的那一支，避免站在祖先上下不去。
+    // 另一支就在下钻后的 rail「同层」里，一次点击可达。
+    if (out.length === 0) {
+      const kids = Object.values(cards).filter(
+        (node) => node.parentLocalId === card.localId && !seen.has(node.localId),
+      )
+      if (kids.length > 1) {
+        const weight = (id: string): number => {
+          const list = Object.values(cards).filter((node) => node.parentLocalId === id)
+          return list.length + list.reduce((sum, node) => sum + weight(node.localId), 0)
+        }
+        const best = kids.reduce((a, b) => (weight(b.localId) >= weight(a.localId) ? b : a))
+        out.push(best)
+        seen.add(best.localId)
       }
     }
 
@@ -314,11 +340,6 @@ export default function App() {
         : [],
     [cards, card],
   )
-  const childCards = useMemo(
-    () => (card ? Object.values(cards).filter((item) => item.parentLocalId === card.localId) : []),
-    [cards, card],
-  )
-
   // 同一处划词的其它根卡（第 1 层的「分支」没有父节点可挂，单独列出来）
   const treeCards = useMemo(() => Object.values(cards), [cards])
   const hasFork = useMemo(() => {
@@ -398,6 +419,15 @@ export default function App() {
       }
       if (!previous || depthOf(localId) >= depthOf(previous)) {
         rememberedFocusRef.current[root] = localId
+        // 冷启动也要能沿面包屑回到深层：把「子树最深处」落到本地
+        const sid = sessionRef.current
+        if (sid) {
+          try {
+            localStorage.setItem(`studydeck.focus.${sid}`, JSON.stringify(rememberedFocusRef.current))
+          } catch {
+            // 隐私模式/配额满：忽略，只影响冷启动的深层路径
+          }
+        }
       }
     },
     [cards],
@@ -1622,7 +1652,6 @@ export default function App() {
         activeIndex={activeIndex}
         descendantPath={descendantPath}
         siblings={siblings}
-        childCards={childCards}
         treeCards={treeCards}
         onFocusNode={focusOn}
         docked={docked}

@@ -34,8 +34,6 @@ export interface CardProps {
   descendantPath: OpenCardState[]
   /** 同一父节点下的其它卡片（平级） */
   siblings: OpenCardState[]
-  /** 当前节点下面已经展开过的卡片（下一层） */
-  childCards: OpenCardState[]
   /** 整棵树的所有节点（dock 大纲用） */
   treeCards: OpenCardState[]
   profile: CardProfile
@@ -85,7 +83,6 @@ export function Card({
   activeIndex,
   descendantPath,
   siblings,
-  childCards,
   treeCards,
   profile,
   onClose,
@@ -499,8 +496,8 @@ export function Card({
         </aside>
       )}
 
-      {!docked && (siblings.length > 0 || childCards.length > 0) && (
-        <aside className={`card-side side-${railSide}`} aria-label={t('同层与下一层')}>
+      {!docked && siblings.length > 0 && (
+        <aside className={`card-side side-${railSide}`} aria-label={t('平级卡片')}>
           {siblings.length > 0 && (
             <div className="side-group">
               <div className="side-head">
@@ -514,31 +511,8 @@ export function Card({
                     key={node.localId}
                     className={`side-item${node.streaming ? ' streaming' : ''}`}
                     onClick={() => onFocusNode(node.localId)}
-                    title={`${node.question === defaultQuestion ? node.anchor.quote : node.question}\n${node.anchor.quote}`}
                   >
                     <span className="side-idx">{activeIndex + 1}.{index + 1}</span>
-                    <span className="side-quote">{node.anchor.quote.replace(/\s+/g, ' ')}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-          {childCards.length > 0 && (
-            <div className="side-group">
-              <div className="side-head">
-                <span className="side-num">L{activeIndex + 2}</span>
-                <span className="side-tag">{t('下一层')}</span>
-                <span className="side-count">{childCards.length}</span>
-              </div>
-              <div className="side-rows">
-                {childCards.map((node, index) => (
-                  <button
-                    key={node.localId}
-                    className={`side-item${node.streaming ? ' streaming' : ''}`}
-                    onClick={() => onFocusNode(node.localId)}
-                    title={node.anchor.quote}
-                  >
-                    <span className="side-idx">{activeIndex + 2}.{index + 1}</span>
                     <span className="side-quote">{node.anchor.quote.replace(/\s+/g, ' ')}</span>
                   </button>
                 ))}
