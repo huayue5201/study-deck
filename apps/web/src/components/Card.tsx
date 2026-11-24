@@ -5,6 +5,8 @@ import { isImeComposing } from '../lib/ime'
 import type { Anchor, CardProfile } from '../lib/types'
 
 export interface OpenCardState {
+  /** 稳定的客户端身份：id 还没回来时也能区分卡片 */
+  localId: string
   id: string | null
   anchor: Anchor
   level: string
@@ -13,27 +15,36 @@ export interface OpenCardState {
   streaming: boolean
   saved: boolean
   promotedSessionId: string | null
-  /** 嵌套展开时的父卡 id */
+  /** 嵌套展开时的父卡 id（真实落库 id） */
   parentCardId: string | null
+  /** 嵌套展开时的父卡本地 id（父卡还没落库时用它连树） */
+  parentLocalId: string | null
   /** 父卡的回答（账本命中卡没有 id，用它给上下文） */
   parentText: string | null
   rect: { left: number; top: number; width: number; height: number }
   sourceText: string
 }
 
-interface Props {
+export interface CardProps {
   card: OpenCardState
   /** 整条链：祖先 → 当前 */
   chain: OpenCardState[]
   activeIndex: number
-  /** 父卡 key → 其它分支（每条是父卡之后的整条后缀链） */
-  branches: Record<string, OpenCardState[][]>
+  /** 每一层「往下走」的其它选择（= 分支），与 chain 同下标 */
+  branchLists: OpenCardState[][]
+  /** 同一处划词的其它根卡（第 1 层的平行分支） */
+  rootBranches: OpenCardState[]
   profile: CardProfile
   onClose: () => void
   /** 跳到链上第 index 层 */
   onJump: (index: number) => void
-  /** 切到某个祖先下的另一条分支 */
-  onSwitchBranch: (parentIndex: number, branchIndex: number) => void
+  /** 切到某个祖先下的另一条分支（直接给目标节点的 localId） */
+  onSwitchBranch: (parentIndex: number, targetLocalId: string) => void
+  /** 在同一处内容上再问一个：新开一条兄弟分支 */
+  onBranch: (text: string) => void
+  /** 钉到右侧（dock）/ 恢复浮层 */
+  docked: boolean
+  onToggleDock: () => void
   onBackToMain: () => void
   /** 在卡片正文里划词，准备嵌套展开 */
   onSelectInCard: () => void
@@ -66,11 +77,15 @@ export function Card({
   card,
   chain,
   activeIndex,
-  branches,
+  branchLists,
+  rootBranches,
   profile,
   onClose,
   onJump,
   onSwitchBranch,
+  onBranch,
+  docked,
+  onToggleDock,
   onBackToMain,
   onSelectInCard,
   onDepthChange,
@@ -79,21 +94,27 @@ export function Card({
   onRegenerate,
   onPromote,
   onOpenPromoted,
-}: Props) {
+}: CardProps) {
   const { t } = useI18n()
   const [draft, setDraft] = useState('')
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
-  // 卡片堆开合（Cover Flow）
-  const [deckOpen, setDeckOpen] = useState(false)
+  // 「在同一处再问一个」的内联输入
+  const [branching, setBranching] = useState(false)
+  const [branchDraft, setBranchDraft] = useState('')
   const ref = useRef<HTMLDivElement | null>(null)
+  const stackRef = useRef<HTMLDivElement | null>(null)
   const drag = useRef<{ dx: number; dy: number } | null>(null)
 
   const bodyRef = useRef<HTMLDivElement | null>(null)
-  // 用「链上位置 + 卡片身份」作为切换标识：同名引文的不同层也算切换
-  const cardKey = `${activeIndex}:${card.id ?? card.anchor.quote}`
+  // 流式跟随的开关：用户上翻就暂停，回到底部再恢复
+  const followRef = useRef(true)
+  const lastScrollRef = useRef(0)
+  // 用「链上位置 + 卡片身份」作为切换标识：同名引文、id 到达都不算切换
+  const cardKey = `${activeIndex}:${card.localId}`
   const prevKey = useRef(cardKey)
   const [closing, setClosing] = useState(false)
   const [ghost, setGhost] = useState<OpenCardState | null>(null)
+  const ghostTimer = useRef<number | null>(null)
   const prevCard = useRef<OpenCardState | null>(null)
 
   // 切层：旧卡做一层「影子」淡出，新卡淡入；正文回到顶部
@@ -106,21 +127,44 @@ export function Card({
     const previous = prevCard.current
     prevCard.current = card
     if (bodyRef.current) bodyRef.current.scrollTop = 0
+    followRef.current = true
+    lastScrollRef.current = 0
+    // 跨层不重挂载：输入草稿属于「这一层」，必须跟着重置
+    setDraft('')
+    setBranching(false)
+    setBranchDraft('')
     // 只让「影子」淡出：卡片本身保持不透明，避免透出背后的聊天内容造成闪烁感
     if (previous) {
       setGhost(previous)
-      const timer = window.setTimeout(() => setGhost(null), 240)
-      return () => window.clearTimeout(timer)
+      // 定时器放 ref：流式更新会让 card 换引用、effect 重跑，
+      // 若把 clearTimeout 挂在 effect 清理里，影子会永远清不掉
+      if (ghostTimer.current !== null) window.clearTimeout(ghostTimer.current)
+      ghostTimer.current = window.setTimeout(() => {
+        setGhost(null)
+        ghostTimer.current = null
+      }, 240)
     }
   }, [card, cardKey])
+  useEffect(
+    () => () => {
+      if (ghostTimer.current !== null) window.clearTimeout(ghostTimer.current)
+    },
+    [],
+  )
 
   // 关卡片：先播退场，再交给上层卸载
+  const closeTimer = useRef<number | null>(null)
   const requestClose = useCallback(() => {
-    setClosing((was) => {
-      if (!was) window.setTimeout(onClose, 160)
-      return true
-    })
+    if (closeTimer.current !== null) return
+    setClosing(true)
+    closeTimer.current = window.setTimeout(onClose, 160)
   }, [onClose])
+  useEffect(
+    () => () => {
+      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current)
+    },
+    [],
+  )
 
   // 视口尺寸：决定扇开幅度，避免封面溢出软件边框
   const [viewport, setViewport] = useState(() => ({
@@ -175,7 +219,7 @@ export function Card({
   useEffect(() => {
     const onResize = () => {
       const el = ref.current
-      if (!el) return
+      if (!el || docked) return
       setPos((current) =>
         current
           ? clampToViewport(current.left, current.top, el.offsetWidth, el.offsetHeight)
@@ -184,13 +228,15 @@ export function Card({
     }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
-  }, [])
+  }, [docked])
 
   // 流式输出会让卡片变高；尺寸一变就重新夹紧，不能等到用户手动拖回来。
   useEffect(() => {
     const el = ref.current
     if (!el || typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver(() => {
+      // dock 时尺寸由 CSS 决定，不能拿它去夹浮层坐标
+      if (docked) return
       const width = el.offsetWidth
       const height = el.offsetHeight
       setPos((current) => {
@@ -201,7 +247,7 @@ export function Card({
     })
     observer.observe(el)
     return () => observer.disconnect()
-  }, [])
+  }, [docked])
 
   // 卡片高度 = 内容高度（有上下限），短内容不留白、长内容到顶后内部滚动
   const [cardHeight, setCardHeight] = useState<number | null>(null)
@@ -217,19 +263,19 @@ export function Card({
       const bodyPad = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
       // 卡片固定部分（头部 / 追问 / 底部）的高度
       const chrome = el.offsetHeight - body.offsetHeight
-      const desired = Math.min(Math.max(inner.offsetHeight + bodyPad + chrome, 340), maxHeight)
+      const desired = Math.min(Math.max(inner.offsetHeight + bodyPad + chrome, 360), maxHeight)
       setCardHeight((prev) => (prev !== null && Math.abs(prev - desired) < 2 ? prev : desired))
     })
     return () => window.cancelAnimationFrame(frame)
   }, [card.answer, cardKey, viewport.h])
 
-  // 流式输出时正文缓动跟到底，避免每个 token 都硬跳一次
+  // 流式输出时正文缓动跟到底；用户主动上翻时暂停，别把人拽回去
   useEffect(() => {
     if (!card.streaming) return
     let frame = 0
     const follow = () => {
       const el = bodyRef.current
-      if (el) {
+      if (el && followRef.current) {
         const gap = el.scrollHeight - el.clientHeight - el.scrollTop
         if (gap > 1) el.scrollTop += Math.max(1, gap * 0.24)
       }
@@ -279,7 +325,7 @@ export function Card({
 
   const startDrag = (event: React.PointerEvent<HTMLElement>) => {
     if ((event.target as HTMLElement).closest('button')) return
-    if (!pos) return
+    if (docked || !pos) return
     drag.current = { dx: event.clientX - pos.left, dy: event.clientY - pos.top }
     event.currentTarget.setPointerCapture(event.pointerId)
   }
@@ -298,123 +344,47 @@ export function Card({
     }
   }
 
-  const stack = chain.slice(0, activeIndex)
   const depth = activeIndex + 1
-  const keyOf = (target: OpenCardState) => target.id ?? `draft:${target.anchor.quote}`
-  const currentKey = keyOf(card)
-  const currentBranches: OpenCardState[][] = branches[currentKey] ?? []
 
-  // 祖先卡做成斜置封面：索引直接对应链上的层号
-  const covers = stack.slice(-4).map((ancestor, index) => {
-    const k = stack.length - Math.min(stack.length, 4) + index
-    return { ancestor, index: k, order: stack.length - k }
-  })
-  const hiddenCovers = Math.max(0, stack.length - 4)
-
-  // 掀开时最左的封面不能越过窗口
-  const coverLeft = 54
-  const clampSpread = (room: number, count: number) =>
-    Math.max(48, Math.min(118, Math.floor(room / Math.max(1, count))))
-  const leftEdge = pos ? pos.left : viewport.w / 2
-  const spreadLeft = stack.length
-    ? clampSpread(leftEdge + coverLeft - 8, Math.min(stack.length, 4))
-    : 118
+  // 与 CSS 的 .card 宽度保持一致（dock 时 CSS 会另行覆盖）
+  const cardWidth = Math.min(510, viewport.w - 16)
 
   // 入场动画从「被划的那段文字」位置长出来
   const enterOrigin = pos
-    ? `${Math.max(0, Math.min(card.rect.left + card.rect.width / 2 - pos.left, 510))}px ${
+    ? `${Math.max(0, Math.min(card.rect.left + card.rect.width / 2 - pos.left, cardWidth))}px ${
         Math.max(-40, Math.min(card.rect.top - pos.top, 420))
       }px`
     : '50% 0%'
 
   return (
     <div
-      className={`card-stack ${closing ? 'closing' : ''}`}
+      ref={stackRef}
+      className={`card-stack${docked ? ' docked' : ''}${closing ? ' closing' : ''}`}
       style={
-        pos
-          ? { left: pos.left, top: pos.top }
-          : { visibility: 'hidden' }
+        docked
+          ? undefined
+          : pos
+            ? { left: pos.left, top: pos.top }
+            : { visibility: 'hidden' }
       }
       onWheel={(event) => event.stopPropagation()}
     >
-      {(chain.length > 1 || chain.some((item) => (branches[keyOf(item)]?.length ?? 0) > 0)) && (
-        <nav className="card-rail" aria-label={t('卡片链')}>
-          {chain.map((item, k) => (
-            <div key={`rail-${item.id ?? item.anchor.quote}-${k}`} className="rail-row">
-              <button
-                className={`rail-item ${k === activeIndex ? 'active' : ''}`}
-                onClick={() => onJump(k)}
-                title={t('第 {n} 层：{text}', { n: k + 1, text: item.anchor.quote })}
-              >
-                <span className="rail-num">L{k + 1}</span>
-                <span className="rail-quote">{item.anchor.quote.slice(0, 20)}</span>
-              </button>
-              {(branches[keyOf(item)]?.length ?? 0) > 0 && (
-                <button
-                  className="rail-branch"
-                  onClick={() => onSwitchBranch(k, 0)}
-                  title={t('这条卡有 {n} 个分支', { n: branches[keyOf(item)]?.length ?? 0 })}
-                >
-                  ⟣{branches[keyOf(item)]?.length}
-                </button>
-              )}
-            </div>
-          ))}
-        </nav>
-      )}
-
-      <div
-        className={`card-deck ${deckOpen ? 'deck-fan' : ''}`}
-        style={
-          {
-            '--spread-l': `${spreadLeft}px`,
-          } as React.CSSProperties
-        }
-      >
-        {stack.length > 0 && (
-          <div
-            className="pile-hotspot"
-            onMouseEnter={() => setDeckOpen(true)}
-            onMouseLeave={() => setDeckOpen(false)}
-            title={t('掀开卡片堆')}
-          />
-        )}
-        {covers.map(({ ancestor, index, order }) => (
-          <button
-            key={`${ancestor.id ?? ancestor.anchor.quote}-${index}`}
-            className="card-cover"
-            style={{ '--d': order } as React.CSSProperties}
-            onClick={() => onJump(index)}
-            title={t('回到：{text}', { text: ancestor.anchor.quote.slice(0, 40) })}
-          >
-            <span className="cover-head">
-              <span className="cover-level">L{index + 1}</span>
-              <span className="cover-tab">{ancestor.anchor.quote.slice(0, 8)}</span>
-              {hiddenCovers > 0 && index === 0 && (
-                <span className="cover-more">+{hiddenCovers}</span>
-              )}
-            </span>
-            <span className="cover-quote">{ancestor.anchor.quote.slice(0, 42)}</span>
-            <span className="cover-gist">
-              {ancestor.answer
-                .replace(/[#*>`_~\-]/g, ' ')
-                .replace(/\s+/g, ' ')
-                .slice(0, 110)}
-            </span>
-          </button>
-        ))}
-
       <div
         className="card"
         ref={ref}
         style={
           {
             '--enter-origin': enterOrigin,
-            height: cardHeight ?? undefined,
+            height: docked ? undefined : cardHeight ?? undefined,
           } as React.CSSProperties
         }
         onMouseUp={(event) => {
           event.stopPropagation()
+          const selection = window.getSelection()
+          if (!selection || selection.isCollapsed || !selection.toString().trim()) return
+          // 只认卡片正文里的选区：避免点卡片时误用聊天区残留的选区
+          const node = selection.anchorNode
+          if (!node || !bodyRef.current?.contains(node)) return
           onSelectInCard()
         }}
       >
@@ -439,47 +409,94 @@ export function Card({
         <div className="card-term" title={card.anchor.quote}>
           {card.anchor.quote.slice(0, 60)}
         </div>
-        <button
-          className={`card-depth-badge ${deckOpen ? 'active' : ''}`}
-          onClick={() => setDeckOpen((value) => !value)}
-          title={t('卡片堆（{n} 层）', { n: stack.length + 1 })}
-        >
+        <span className="card-depth-badge" title={t('当前深度')}>
           {t('第 {n} 层', { n: depth })}
+        </span>
+        <button
+          className={`icon card-dock${docked ? ' active' : ''}`}
+          onClick={onToggleDock}
+          title={docked ? t('取消固定') : t('固定到右侧')}
+        >
+          {docked ? '⇤' : '⇥'}
         </button>
         <button className="icon" onClick={requestClose} title={t('关闭整叠（Esc）')}>
           ×
         </button>
       </header>
 
-      <div className="card-breadcrumb">
-        <button className="crumb" onClick={onBackToMain}>
+      <nav className="card-crumbs" aria-label={t('卡片链')}>
+        <button className="crumb home" onClick={onBackToMain}>
           {t('主线')}
         </button>
-        {stack.map((ancestor, index) => (
-          <span key={`${ancestor.id ?? index}`} className="crumb-wrap">
-            <span className="crumb-sep">›</span>
-            <button className="crumb" onClick={() => onJump(index)}>
-              {ancestor.anchor.quote.slice(0, 14)}
-            </button>
-          </span>
+        {rootBranches.map((sib) => (
+          <button
+            key={sib.localId}
+            className={`branch-chip${sib.streaming ? ' streaming' : ''}`}
+            onClick={() => onSwitchBranch(-1, sib.localId)}
+            title={sib.question}
+          >
+            {sib.anchor.quote.slice(0, 10)} · {(sib.question || t('新分支')).slice(0, 14)}
+          </button>
         ))}
-        <span className="crumb-sep">›</span>
-        <span className="crumb current">{card.anchor.quote.slice(0, 14)}</span>
-      </div>
+        {chain.map((node, index) => {
+          const siblings = branchLists[index] ?? []
+          return (
+            <span key={node.localId} className="crumb-group">
+              <span className="crumb-sep">›</span>
+              <button
+                className={`crumb${index === activeIndex ? ' current' : ''}`}
+                onClick={() => onJump(index)}
+                title={node.anchor.quote}
+              >
+                <span className="crumb-num">L{index + 1}</span>
+                {node.anchor.quote.slice(0, 16)}
+              </button>
+              {siblings.map((sib) => (
+                <button
+                  key={sib.localId}
+                  className={`branch-chip${sib.streaming ? ' streaming' : ''}`}
+                  onClick={() => onSwitchBranch(index, sib.localId)}
+                  title={t('切到分支：{text}', { text: sib.anchor.quote })}
+                >
+                  L{index + 2} · {sib.anchor.quote.slice(0, 12)}
+                </button>
+              ))}
+            </span>
+          )
+        })}
+        <button
+          className={`crumb-add${branching ? ' active' : ''}`}
+          onClick={() => setBranching((value) => !value)}
+          disabled={card.streaming}
+          title={t('在同一处内容上再问一个（新分支）')}
+        >
+          ＋
+        </button>
+      </nav>
 
-      {currentBranches.length > 0 && (
-        <div className="card-branches">
-          <span className="branch-label">{t('分支')}</span>
-          {currentBranches.map((branch, index) => (
-            <button
-              key={`branch-chip-${index}`}
-              className="branch-chip"
-              onClick={() => onSwitchBranch(activeIndex, index)}
-              title={t('切到分支：{text}', { text: branch[0]?.anchor.quote ?? '' })}
-            >
-              L{activeIndex + 2} · {(branch[0]?.anchor.quote ?? '').slice(0, 16)}
-            </button>
-          ))}
+      {branching && (
+        <div className="card-branch-ask">
+          <input
+            autoFocus
+            value={branchDraft}
+            placeholder={t('针对「{text}」再问一个…', { text: card.anchor.quote.slice(0, 18) })}
+            onChange={(event) => setBranchDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                setBranching(false)
+                setBranchDraft('')
+                return
+              }
+              if (event.key === 'Enter' && !isImeComposing(event)) {
+                event.preventDefault()
+                const text = branchDraft.trim()
+                if (!text) return
+                setBranching(false)
+                setBranchDraft('')
+                onBranch(text)
+              }
+            }}
+          />
         </div>
       )}
 
@@ -521,7 +538,18 @@ export function Card({
         </div>
       )}
 
-      <div className="card-body" ref={bodyRef} data-card-id={card.id ?? 'draft'}>
+      <div className="card-body" ref={bodyRef} data-card-id={card.id ?? card.localId}
+        onScroll={() => {
+          const el = bodyRef.current
+          if (!el || !card.streaming) return
+          const top = el.scrollTop
+          const gap = el.scrollHeight - el.clientHeight - top
+          // 只把「向上滚」当用户接管；程序自己的向下滚动不会误判
+          if (top < lastScrollRef.current - 2 && gap > 24) followRef.current = false
+          else if (gap < 8) followRef.current = true
+          lastScrollRef.current = top
+        }}
+      >
         <div
           className="card-body-inner"
           ref={innerRef}
@@ -556,7 +584,7 @@ export function Card({
               {t('重新生成')}
             </button>
           )}
-          <button onClick={onSave} disabled={card.saved || !card.answer}>
+          <button onClick={onSave} disabled={card.saved || card.streaming || !card.answer}>
             {card.saved ? t('已保存') : t('保存到账本')}
           </button>
           {card.promotedSessionId ? (
@@ -574,7 +602,6 @@ export function Card({
           )}
         </div>
       </footer>
-      </div>
       </div>
     </div>
   )

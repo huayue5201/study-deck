@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Composer } from './components/Composer'
 import { Sidebar } from './components/Sidebar'
 import { OriginBanner } from './components/OriginBanner'
@@ -12,7 +12,7 @@ import { GlossaryPanel } from './components/GlossaryPanel'
 import { SetupGate } from './components/SetupGate'
 import { SettingsPanel } from './components/SettingsPanel'
 import { ProfilesModal } from './components/ProfilesModal'
-import type { OpenCardState } from './components/Card'
+import { type OpenCardState } from './components/Card'
 import {
   createSession,
   fetchHealth,
@@ -68,6 +68,12 @@ interface PendingSelection {
   /** 选区在卡片里时带上卡片 id（嵌套展开） */
   fromCardId?: string
 }
+
+let localCardSeq = 0
+const newLocalId = () =>
+  `lc_${Date.now().toString(36)}_${(localCardSeq++).toString(36)}_${Math.random()
+    .toString(36)
+    .slice(2, 6)}`
 
 const OUTLINE_PROMPT =
   '请基于这个专题起点，先给我一个 3–5 条的学习地图：每条只写主题、与其它条目的先修关系和目标深度；先不要展开正文，等我确认。'
@@ -166,34 +172,132 @@ export default function App() {
     ok?: boolean
   } | null>(null)
   const [fake, setFake] = useState(false)
-  // 学习路径：根 → 当前（当前 = path 末尾）
-  const [path, setPath] = useState<OpenCardState[]>([])
+  // 卡片树：localId → 节点，父子关系靠 parentLocalId；focusId 指向当前聚焦的卡。
+  // 层级不再用 path + branches 两套状态：路径由 parent 链派生，分支就是兄弟节点。
+  const [cards, setCards] = useState<Record<string, OpenCardState>>({})
+  const [focusId, setFocusId] = useState<string | null>(null)
+  // 每棵子树上次看到的最深处：切分支时能回到原位
+  const rememberedFocusRef = useRef<Record<string, string>>({})
   // 会话里已经存在的卡片（用于「同一处划词直接复用」）
   const sessionCardsRef = useRef<CardRecord[]>([])
-  // 分叉：父卡 key → 其它分支（每条分支是父卡之后的整条后缀链）
-  const [branches, setBranches] = useState<Record<string, OpenCardState[][]>>({})
-  const card = path.length > 0 ? path[path.length - 1] : null
 
-  /** 只更新当前卡（流式输出、保存状态等） */
-  const updateCurrent = useCallback((updater: (current: OpenCardState) => OpenCardState) => {
-    setPath((prev) => (prev.length === 0 ? prev : [...prev.slice(0, -1), updater(prev[prev.length - 1])]))
+  // 换会话时清空卡片树；关闭卡片栈不清（同会话内再打开还能切回分支）
+  useEffect(() => {
+    setCards({})
+    setFocusId(null)
+    rememberedFocusRef.current = {}
+    // 冷启动也要有账本缓存，否则同锚点复用永远不命中，每次重开都白花一次模型调用
+    if (!sessionId) {
+      sessionCardsRef.current = []
+      return
+    }
+    let alive = true
+    void fetchSession(sessionId)
+      .then((view) => {
+        if (alive) sessionCardsRef.current = view.cards
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [sessionId])
+
+  // 当前路径 = 从焦点往上走到根
+  const chain = useMemo(() => {
+    const out: OpenCardState[] = []
+    let cursor = focusId
+    const seen = new Set<string>()
+    while (cursor && cards[cursor] && !seen.has(cursor)) {
+      seen.add(cursor)
+      const node = cards[cursor]
+      out.unshift(node)
+      cursor = node.parentLocalId
+    }
+    return out
+  }, [cards, focusId])
+  const card = chain.length > 0 ? chain[chain.length - 1] : null
+  const activeIndex = chain.length - 1
+
+  /** 每层「往下走」的其它选择（= 分支）。分支就是树的子节点，不需要另存快照 */
+  const branchLists = useMemo(() => {
+    const byParent = new Map<string | null, OpenCardState[]>()
+    for (const node of Object.values(cards)) {
+      const list = byParent.get(node.parentLocalId) ?? []
+      list.push(node)
+      byParent.set(node.parentLocalId, list)
+    }
+    return chain.map((node, index) => {
+      const next = chain[index + 1]
+      return (byParent.get(node.localId) ?? []).filter((item) => item.localId !== next?.localId)
+    })
+  }, [cards, chain])
+
+  // 同一处划词的其它根卡（第 1 层的「分支」没有父节点可挂，单独列出来）
+  const rootBranches = useMemo(
+    () =>
+      Object.values(cards).filter(
+        (item) => item.parentLocalId === null && item.localId !== chain[0]?.localId,
+      ),
+    [cards, chain],
+  )
+
+  const addCard = useCallback((node: OpenCardState) => {
+    setCards((prev) => ({ ...prev, [node.localId]: node }))
   }, [])
 
-  const branchKey = (target: OpenCardState) => target.id ?? `draft:${target.anchor.quote}`
-  const chainSignature = (chain: OpenCardState[]) =>
-    chain.map((item) => item.id ?? item.anchor.quote).join(' > ')
+  /** 只更新某一个节点——流式中切层/切分支也不会写错卡 */
+  const updateCard = useCallback(
+    (localId: string, updater: (current: OpenCardState) => OpenCardState) => {
+      setCards((prev) => {
+        const current = prev[localId]
+        if (!current) return prev
+        const next = updater(current)
+        return next === current ? prev : { ...prev, [localId]: next }
+      })
+    },
+    [],
+  )
 
-  /** 把一条「父卡之后」的路径登记成分支，供随时切回 */
-  const rememberBranch = useCallback((parent: OpenCardState, chain: OpenCardState[]) => {
-    if (chain.length === 0) return
-    const key = branchKey(parent)
-    const signature = chainSignature(chain)
-    setBranches((prev) => {
-      const list = prev[key] ?? []
-      if (list.some((item) => chainSignature(item) === signature)) return prev
-      return { ...prev, [key]: [chain, ...list] }
+  /** 卡片落库拿到 id 后：补上自己的 id，并把子卡指向真实父 id（内存树靠 parentLocalId，不受影响） */
+  const relink = useCallback((localId: string, realId: string) => {
+    setCards((prev) => {
+      let changed = false
+      const next = { ...prev }
+      const self = next[localId]
+      if (self && self.id !== realId) {
+        next[localId] = { ...self, id: realId }
+        changed = true
+      }
+      for (const [key, node] of Object.entries(next)) {
+        if (node.parentLocalId === localId && node.parentCardId !== realId) {
+          next[key] = { ...node, parentCardId: realId }
+          changed = true
+        }
+      }
+      return changed ? next : prev
     })
   }, [])
+
+  /** 聚焦某张卡：记住它所在子树的最深处，切回来时回到原位 */
+  const focusOn = useCallback(
+    (localId: string | null) => {
+      if (!localId) {
+        setFocusId(null)
+        return
+      }
+      setFocusId(localId)
+      let root = localId
+      let cursor = cards[localId]?.parentLocalId ?? null
+      const seen = new Set<string>([localId])
+      while (cursor && cards[cursor] && !seen.has(cursor)) {
+        seen.add(cursor)
+        root = cursor
+        cursor = cards[cursor].parentLocalId
+      }
+      rememberedFocusRef.current[root] = localId
+    },
+    [cards],
+  )
 
   // 卡片栈：祖先在下，当前卡是 card
   const [pending, setPending] = useState<PendingSelection | null>(null)
@@ -219,7 +323,6 @@ export default function App() {
 
   const sessionRef = useRef<string | null>(null)
   const assistantIdRef = useRef<string | null>(null)
-  const cardIdRef = useRef<string | null>(null)
   const toolTimerRef = useRef<number | null>(null)
 
   sessionRef.current = sessionId
@@ -483,7 +586,6 @@ export default function App() {
       setMessages(view.messages)
       setOrigin(view.origin ?? null)
       setTopic(view.topic ?? null)
-      setPath([])
       setTopicPageId(null)
       setCoursePageId(null)
       if (window.innerWidth <= 900) setSidebarOpen(false)
@@ -501,7 +603,6 @@ export default function App() {
       setMessages([])
       setOrigin(null)
       setTopic(null)
-      setPath([])
       setTopicPageId(null)
       setCoursePageId(null)
       await refreshSessions()
@@ -533,7 +634,6 @@ export default function App() {
       setMessages(view.messages)
       setOrigin(view.origin ?? null)
       setTopic(view.topic ?? null)
-      setPath([])
       setTopicPageId(null)
       setCoursePageId(null)
       await refreshSessions()
@@ -712,6 +812,7 @@ export default function App() {
 
   const runCard = useCallback(
     async (
+      targetLocalId: string,
       anchor: Anchor,
       level: string,
       text: string,
@@ -724,21 +825,17 @@ export default function App() {
     ) => {
       const sid = sessionRef.current
       if (!sid) return
-      updateCurrent((current) =>
-        current
-          ? {
-              ...current,
-              answer:
-                append && current.answer.trim()
-                  ? `${current.answer}\n\n---\n\n**追问：** ${text}\n\n`
-                  : '',
-              streaming: true,
-              level,
-              question: text,
-              sourceText,
-            }
-          : current,
-      )
+      updateCard(targetLocalId, (current) => ({
+        ...current,
+        answer:
+          append && current.answer.trim()
+            ? `${current.answer}\n\n---\n\n**追问：** ${text}\n\n`
+            : '',
+        streaming: true,
+        level,
+        question: text,
+        sourceText,
+      }))
 
       try {
         await streamChat(
@@ -757,25 +854,25 @@ export default function App() {
           },
           (frame) => {
             if (frame.type === 'delta') {
-              updateCurrent((current) =>
-                current ? { ...current, answer: current.answer + frame.text } : current,
-              )
+              updateCard(targetLocalId, (current) => ({
+                ...current,
+                answer: current.answer + frame.text,
+              }))
             }
             if (frame.type === 'tool_call') beginTool(frame.name, frame.args)
             if (frame.type === 'tool_done') finishTool(frame.name, frame.ok)
             if (frame.type === 'error') {
-              updateCurrent((current) =>
-                current
-                  ? { ...current, answer: `${current.answer}\n\n**出错**：${frame.message}` }
-                  : current,
-              )
+              updateCard(targetLocalId, (current) => ({
+                ...current,
+                answer: `${current.answer}\n\n**出错**：${frame.message}`,
+              }))
             }
           },
         )
       } catch (err) {
         setError(String(err))
       } finally {
-        updateCurrent((current) => (current ? { ...current, streaming: false } : current))
+        updateCard(targetLocalId, (current) => ({ ...current, streaming: false }))
         clearTool()
       }
 
@@ -786,24 +883,19 @@ export default function App() {
           const matched = view.cards
             .filter((item) => item.anchor.message_id === anchor.message_id && item.anchor.quote === anchor.quote)
             .pop()
-          if (matched) cardIdRef.current = matched.id
-          updateCurrent((current) =>
-            current
-              ? {
-                  ...current,
-                  id: matched?.id ?? null,
-                  promotedSessionId: matched?.promoted_session_id ?? current.promotedSessionId,
-                  parentCardId: current.parentCardId,
-                  parentText: current.parentText,
-                }
-              : current,
-          )
+          if (matched) {
+            relink(targetLocalId, matched.id)
+            updateCard(targetLocalId, (current) => ({
+              ...current,
+              promotedSessionId: matched.promoted_session_id ?? current.promotedSessionId,
+            }))
+          }
         } catch {
           // 拿不到 id 也能继续用，只是追问会新开一张卡片
         }
       }
     },
-    [activeProfile.id, beginTool, finishTool, clearTool],
+    [activeProfile.id, beginTool, finishTool, clearTool, lang, updateCard, relink],
   )
 
   const submitPromotion = useCallback(
@@ -832,7 +924,6 @@ export default function App() {
         setMessages(view.messages)
         setOrigin(view.origin ?? result.seed)
         setTopic(view.topic ?? result.topic)
-        setPath([])
         setPromote(null)
         setTopicPageId(null)
         await refreshSessions()
@@ -868,7 +959,8 @@ export default function App() {
 
 
   const saveCard = useCallback(async () => {
-    if (!card || !card.answer.trim() || card.saved) return
+    // 流式中的答案不完整，别写进账本（服务端会自己持久化卡片正文）
+    if (!card || card.streaming || !card.answer.trim() || card.saved) return
     try {
       await saveGlossary({
         term: card.anchor.quote.slice(0, 80),
@@ -880,7 +972,7 @@ export default function App() {
         parent_card_id: card.parentCardId ?? undefined,
         card_id: card.id ?? undefined,
       })
-      updateCurrent((current) => (current ? { ...current, saved: true } : current))
+      updateCard(card.localId, (current) => ({ ...current, saved: true }))
       if (glossaryOpen) void refreshGlossary(query)
     } catch (err) {
       setError(String(err))
@@ -888,117 +980,174 @@ export default function App() {
   }, [activeProfile, card, glossaryOpen, query, refreshGlossary])
 
   /** 在「某个祖先」的多个分支之间切换 */
+  /** 在某个祖先的多个分支之间切换（分支 = 兄弟节点，切过去就是聚焦它上次的位置） */
   const switchBranch = useCallback(
-    async (parentIndex: number, branchIndex: number) => {
-      const parent = path[parentIndex]
-      if (!parent) return
-      const key = branchKey(parent)
-      const list = branches[key] ?? []
-      const target = list[branchIndex]
-      if (!target) return
-      await saveCard()
-      const dropped = path.slice(parentIndex + 1)
-      if (dropped.length > 0) rememberBranch(parent, dropped)
-      setBranches((prev) => ({
-        ...prev,
-        [key]: (prev[key] ?? []).filter((_, index) => index !== branchIndex),
-      }))
-      setPath([...path.slice(0, parentIndex + 1), ...target])
-      cardIdRef.current = target[0]?.id ?? null
+    (parentIndex: number, targetLocalId: string) => {
+      const list = parentIndex < 0 ? rootBranches : branchLists[parentIndex]
+      if (!list?.some((item) => item.localId === targetLocalId)) return
+      focusOn(rememberedFocusRef.current[targetLocalId] ?? targetLocalId)
     },
-    [branches, path, rememberBranch, saveCard],
+    [branchLists, focusOn, rootBranches],
+  )
+
+  /** 在同一处内容上再问一个：在当前卡的父节点下新开一条兄弟分支 */
+  const branchFrom = useCallback(
+    (text: string) => {
+      if (!card) return
+      const parent = chain[activeIndex - 1] ?? null
+      const level = resolveLevel(activeProfile, card.level)
+      const node: OpenCardState = {
+        localId: newLocalId(),
+        id: null,
+        anchor: card.anchor,
+        level,
+        answer: '',
+        streaming: true,
+        saved: false,
+        promotedSessionId: null,
+        parentCardId: parent?.id ?? null,
+        parentLocalId: parent?.localId ?? null,
+        parentText: parent?.answer ?? null,
+        question: text,
+        rect: card.rect,
+        sourceText: card.sourceText,
+      }
+      addCard(node)
+      focusOn(node.localId)
+      void runCard(
+        node.localId,
+        node.anchor,
+        level,
+        text,
+        null,
+        node.sourceText,
+        false,
+        undefined,
+        node.parentCardId,
+        node.parentText,
+      )
+    },
+    [activeIndex, activeProfile, addCard, card, chain, focusOn, runCard],
   )
   const openCard = useCallback(async () => {
     if (!pending) return
     const { anchor, rect, sourceText, fromCardId } = pending
     setPending(null)
     window.getSelection()?.removeAllRanges()
-    cardIdRef.current = null
 
-    // 嵌套展开：把当前卡之后的旧路径存成一个分支（不丢弃），再在当前卡下开新分支
+    // 嵌套展开：选区在当前卡里。父卡可能还没落库（id 为空），用 localId 连树
     const nestingFrom = fromCardId && card ? card : null
-    if (nestingFrom) {
-      await saveCard()
+    const parentLocalId = nestingFrom?.localId ?? null
+    const parentCardId = nestingFrom?.id ?? null
+    if (nestingFrom) await saveCard()
+
+    const sameAnchor = (item: OpenCardState) =>
+      item.anchor.message_id === anchor.message_id &&
+      item.anchor.quote === anchor.quote &&
+      item.anchor.char_start === anchor.char_start &&
+      item.anchor.char_end === anchor.char_end
+
+    /** 这张卡已经在树里：直接聚焦过去，0 次模型调用 */
+    const land = (predicate: (item: OpenCardState) => boolean): boolean => {
+      const hit = Object.values(cards).find(predicate)
+      if (!hit) return false
+      focusOn(hit.localId)
+      return true
     }
 
-    const base = {
-      id: null as string | null,
-      anchor,
-      question: anchor.quote,
-      rect,
-      sourceText,
-      promotedSessionId: null as string | null,
-      parentCardId: nestingFrom?.id ?? null,
-      parentText: nestingFrom?.answer ?? null,
-    }
-
-    // 同一处划词已经在卡片里展开过：直接打开那张卡，不重复生成、不覆盖
-    const parentId = nestingFrom?.id ?? null
-    const existing = sessionCardsRef.current.find(
-      (item) =>
-        (item.parent_card_id ?? null) === parentId &&
-        item.anchor.message_id === anchor.message_id &&
-        item.anchor.char_start === anchor.char_start &&
-        item.anchor.char_end === anchor.char_end,
+    // 1) 内存里已经有同一处划词（同父卡）：直接跳，0 次模型调用
+    const memoryHit = Object.values(cards).find(
+      (item) => item.parentLocalId === parentLocalId && sameAnchor(item),
     )
-    if (existing) {
-      cardIdRef.current = existing.id
-      // 已经在当前路径上：直接跳过去，不重复挂节点
-      const inPath = path.findIndex((item) => item.id === existing.id)
-      if (inPath >= 0) {
-        await saveCard()
-        const dropped = path.slice(inPath + 1)
-        if (dropped.length > 0) rememberBranch(path[inPath], dropped)
-        setPath(path.slice(0, inPath + 1))
-        return
-      }
-      // 在某个分支里：切到那条分支
-      for (const [key, list] of Object.entries(branches)) {
-        const branchIndex = list.findIndex((chain) => chain.some((item) => item.id === existing.id))
-        if (branchIndex < 0) continue
-        const parentIndex = path.findIndex((item) => branchKey(item) === key)
-        if (parentIndex >= 0) {
-          await switchBranch(parentIndex, branchIndex)
-          return
-        }
-      }
-      // 都不在：作为新节点接到当前卡后面（内容直接复用，不重新生成）
-      setPath((prev) => [
-        ...prev,
-        {
-          ...base,
+    if (memoryHit && land((item) => item.localId === memoryHit.localId)) return
+
+    // 2) 数据库里已有同一处划词（父卡已经有真实 id 才能可靠比对）
+    if (!nestingFrom || parentCardId) {
+      const existing = sessionCardsRef.current.find(
+        (item) =>
+          item.session_id === sessionRef.current &&
+          (item.parent_card_id ?? null) === parentCardId &&
+          item.anchor.message_id === anchor.message_id &&
+          item.anchor.quote === anchor.quote &&
+          item.anchor.char_start === anchor.char_start &&
+          item.anchor.char_end === anchor.char_end,
+      )
+      if (existing) {
+        if (land((item) => item.id === existing.id)) return
+        // 不在内存树里：作为新节点接在后面，内容直接复用
+        const reused: OpenCardState = {
+          localId: newLocalId(),
           id: existing.id,
+          anchor,
           level: existing.level ?? resolveLevel(activeProfile),
           answer: existing.answer,
           streaming: false,
           saved: true,
           promotedSessionId: existing.promoted_session_id ?? null,
-        },
-      ])
-      return
+          parentCardId,
+          parentLocalId,
+          parentText: nestingFrom?.answer ?? null,
+          question: anchor.quote,
+          rect,
+          sourceText,
+        }
+        addCard(reused)
+        focusOn(reused.localId)
+        return
+      }
     }
 
-    // 命中优先：账本里已经有这个词，就先把旧结论摆出来，别再花一次钱
+    // 3) 账本里已经有这个词：先把旧结论摆出来，别再花一次钱
     try {
       const hit = await matchEntry(anchor.quote)
       if (hit) {
         const level = resolveLevel(activeProfile, hit.depth)
-        setPath((prev) => [...prev, {
-          ...base,
+        const reused: OpenCardState = {
+          localId: newLocalId(),
+          id: null,
+          anchor,
           level,
           answer: `**已有记录**（${activeProfile.levels.find((item) => item.id === level)?.label ?? hit.depth} · ${MASTERY_LABEL[hit.mastery]} · 记于 ${hit.created_at.slice(0, 10)}）\n\n${hit.gist}\n\n> 这是账本里的旧结论。要重新讲一遍点「重新生成」。`,
           streaming: false,
           saved: true,
-        }])
+          promotedSessionId: null,
+          parentCardId,
+          parentLocalId,
+          parentText: nestingFrom?.answer ?? null,
+          question: anchor.quote,
+          rect,
+          sourceText,
+        }
+        addCard(reused)
+        focusOn(reused.localId)
         return
       }
     } catch {
       // 查不到就当新词处理
     }
 
+    // 4) 新卡：先挂节点（有自己的 localId），再发起流式请求
     const level = resolveLevel(activeProfile)
-    setPath((prev) => [...prev, { ...base, level, answer: '', streaming: true, saved: false }])
+    const node: OpenCardState = {
+      localId: newLocalId(),
+      id: null,
+      anchor,
+      level,
+      answer: '',
+      streaming: true,
+      saved: false,
+      promotedSessionId: null,
+      parentCardId,
+      parentLocalId,
+      parentText: nestingFrom?.answer ?? null,
+      question: anchor.quote,
+      rect,
+      sourceText,
+    }
+    addCard(node)
+    focusOn(node.localId)
     void runCard(
+      node.localId,
       anchor,
       level,
       t('请解释这段内容。'),
@@ -1006,39 +1155,34 @@ export default function App() {
       sourceText,
       false,
       undefined,
-      base.parentCardId,
-      base.parentText,
+      parentCardId,
+      nestingFrom?.answer ?? null,
     )
-  }, [activeProfile, card, pending, runCard, saveCard, t])
+  }, [activeProfile, addCard, card, cards, focusOn, pending, runCard, saveCard, t])
 
   const closeCard = useCallback(async () => {
     await saveCard()
-    setPath([])
-    setBranches({})
+    setFocusId(null)
   }, [saveCard])
 
-  const chain = path
-  const activeIndex = path.length - 1
-
-  /** 跳到链上第 k 层；被跳过的更深卡会变成这条路径上的一个分支，不会丢 */
+  /** 跳到链上第 k 层；跳过的更深层留在树里当分支，随时能切回 */
   const jumpToLayer = useCallback(
-    async (k: number) => {
-      const target = path[k]
+    (k: number) => {
+      const target = chain[k]
       if (!target || k === activeIndex) return
-      await saveCard()
-      const dropped = path.slice(k + 1)
-      if (dropped.length > 0) rememberBranch(target, dropped)
-      setPath(path.slice(0, k + 1))
-      cardIdRef.current = target.id
+      focusOn(target.localId)
     },
-    [activeIndex, path, rememberBranch, saveCard],
+    [activeIndex, chain, focusOn],
   )
 
   const backToMain = useCallback(async () => {
     await saveCard()
-    setPath([])
-    setBranches({})
+    setFocusId(null)
   }, [saveCard])
+
+  // 深度 ≥3 自动钉到右侧，或用户手动钉住
+  const [pinned, setPinned] = useState(false)
+  const docked = Boolean(card) && (pinned || chain.length >= 3)
 
   // Esc 关闭卡片由 Card 自己处理（它要先播退场动画），这里只负责取消划词浮层
   useEffect(() => {
@@ -1059,7 +1203,6 @@ export default function App() {
           localStorage.setItem('studydeck.session', view.id)
           setSessionId(view.id)
           setMessages(view.messages)
-          setPath([])
           setTopicPageId(null)
           setCoursePageId(null)
         } catch (err) {
@@ -1103,7 +1246,7 @@ export default function App() {
     t('未命名')
 
   return (
-    <div className="app">
+    <div className={`app${docked ? ' with-dock' : ''}`}>
       {sidebarOpen && (
         <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
       )}
@@ -1339,24 +1482,29 @@ export default function App() {
         card={card}
         chain={chain}
         activeIndex={activeIndex}
-        branches={branches}
+        branchLists={branchLists}
+        rootBranches={rootBranches}
+        docked={docked}
         profile={activeProfile}
         onClose={() => void closeCard()}
         onJump={(index) => void jumpToLayer(index)}
-        onSwitchBranch={(parentIndex, branchIndex) => void switchBranch(parentIndex, branchIndex)}
+        onSwitchBranch={switchBranch}
+        onToggleDock={() => setPinned((value) => !value)}
+        onBranch={branchFrom}
         onBackToMain={() => void backToMain()}
         onSelectInCard={handleMouseUp}
         onDepthChange={(level) => {
           if (!card) return
-          void runCard(card.anchor, level, card.question, cardIdRef.current ?? card.id, card.sourceText)
+          void runCard(card.localId, card.anchor, level, card.question, card.id, card.sourceText)
         }}
         onFollowUp={(text) => {
           if (!card) return
           void runCard(
+            card.localId,
             card.anchor,
             resolveLevel(activeProfile, card.level),
             text,
-            cardIdRef.current ?? card.id,
+            card.id,
             card.sourceText,
             true,
             card.answer,
@@ -1365,12 +1513,13 @@ export default function App() {
         onSave={() => void saveCard()}
         onRegenerate={() => {
           if (!card) return
-          updateCurrent((current) => ({ ...current, saved: false }))
+          updateCard(card.localId, (current) => ({ ...current, saved: false }))
           void runCard(
+            card.localId,
             card.anchor,
             resolveLevel(activeProfile, card.level),
             t('请重新解释这段内容。'),
-            cardIdRef.current ?? card.id,
+            card.id,
             card.sourceText,
           )
         }}
@@ -1380,7 +1529,6 @@ export default function App() {
         onOpenPromoted={() => {
           if (!card?.promotedSessionId) return
           const id = card.promotedSessionId
-          setPath([])
           void switchSession(id)
         }}
       />
