@@ -2524,6 +2524,8 @@ mod tests {
             promoted_session_id: None,
             profile_id: None,
             level: None,
+            parent_card_id: None,
+            stack_depth: 0,
             created_at: Utc::now(),
         };
         store.add_card(&card).expect("card");

@@ -529,6 +529,7 @@ mod profile_tests {
             profile,
             level: level.map(|value| value.to_string()),
             locale: None,
+            nest_source: None,
             parent_card: None,
             card_history: None,
             topic: None,

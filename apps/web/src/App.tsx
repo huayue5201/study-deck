@@ -954,16 +954,14 @@ export default function App() {
     setForwardStack([])
   }, [saveCard])
 
+  // Esc 关闭卡片由 Card 自己处理（它要先播退场动画），这里只负责取消划词浮层
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        if (card) void closeCard()
-        else setPending(null)
-      }
+      if (event.key === 'Escape' && !card) setPending(null)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [card, closeCard])
+  }, [card])
 
   const jumpTo = useCallback(
     async (sessionId: string | null, messageId: string | null) => {

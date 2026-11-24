@@ -82,16 +82,29 @@ export function Card({
   const ref = useRef<HTMLDivElement | null>(null)
   const drag = useRef<{ dx: number; dy: number } | null>(null)
 
-  const cardKey = card.anchor.quote + (card.parentCardId ?? '')
+  const bodyRef = useRef<HTMLDivElement | null>(null)
+  const cardKey = `${card.anchor.quote}|${card.parentCardId ?? ''}`
   const prevKey = useRef(cardKey)
   const [switching, setSwitching] = useState(false)
+  const [closing, setClosing] = useState(false)
+
+  // 切层：淡入 + 正文回到顶部（DOM 不重建，所以要手动归零滚动位）
   useEffect(() => {
     if (prevKey.current === cardKey) return
     prevKey.current = cardKey
+    if (bodyRef.current) bodyRef.current.scrollTop = 0
     setSwitching(true)
     const timer = window.setTimeout(() => setSwitching(false), 220)
     return () => window.clearTimeout(timer)
   }, [cardKey])
+
+  // 关卡片：先播退场，再交给上层卸载
+  const requestClose = useCallback(() => {
+    setClosing((was) => {
+      if (!was) window.setTimeout(onClose, 160)
+      return true
+    })
+  }, [onClose])
 
   // 视口尺寸：决定扇开幅度，避免封面溢出软件边框
   const [viewport, setViewport] = useState(() => ({
@@ -174,34 +187,59 @@ export function Card({
     return () => observer.disconnect()
   }, [])
 
-  // 固定高度后，正文在卡片内部滚动；流式输出时自动跟到底
-  const bodyRef = useRef<HTMLDivElement | null>(null)
+  // 流式输出时正文缓动跟到底，避免每个 token 都硬跳一次
   useEffect(() => {
-    const el = bodyRef.current
-    if (!el || !card.streaming) return
-    el.scrollTop = el.scrollHeight
-  }, [card.answer, card.streaming])
+    if (!card.streaming) return
+    let frame = 0
+    const follow = () => {
+      const el = bodyRef.current
+      if (el) {
+        const gap = el.scrollHeight - el.clientHeight - el.scrollTop
+        if (gap > 1) el.scrollTop += Math.max(1, gap * 0.24)
+      }
+      frame = window.requestAnimationFrame(follow)
+    }
+    frame = window.requestAnimationFrame(follow)
+    return () => window.cancelAnimationFrame(frame)
+  }, [card.streaming])
 
-  // 卡片打开时，1–9 直接切档；输入框 / 文本域里不抢数字键。
+  // 卡片打开时的键盘：Esc 关、←/→ 在链上翻层、1–9 切档；输入框里全部让路
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return
-      if (!/^[1-9]$/.test(event.key)) return
       const target = event.target as HTMLElement | null
+      // 上层有弹窗时不抢键，避免改到弹窗背后的卡片
+      if (target?.closest('.modal-backdrop')) return
       const tag = target?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) {
+      const typing =
+        tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || Boolean(target?.isContentEditable)
+
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        requestClose()
         return
       }
-      // 上层有弹窗时不抢数字键，避免改到弹窗背后的卡片。
-      if (target?.closest('.modal-backdrop')) return
+      if (typing) return
+
+      if (event.key === 'ArrowLeft' && activeIndex > 0) {
+        event.preventDefault()
+        onJump(activeIndex - 1)
+        return
+      }
+      if (event.key === 'ArrowRight' && activeIndex < chain.length - 1) {
+        event.preventDefault()
+        onJump(activeIndex + 1)
+        return
+      }
+      if (!/^[1-9]$/.test(event.key) || card.streaming) return
       const level = levels[Number(event.key) - 1]
-      if (!level || card.streaming) return
+      if (!level) return
       event.preventDefault()
       onDepthChange(level.id)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [levels, card.streaming, onDepthChange])
+  }, [activeIndex, card.streaming, chain.length, levels, onDepthChange, onJump, requestClose])
 
   const startDrag = (event: React.PointerEvent<HTMLElement>) => {
     if ((event.target as HTMLElement).closest('button')) return
@@ -235,16 +273,22 @@ export function Card({
   })
   const hiddenCovers = Math.max(0, stack.length - 4)
 
-  // 左/右可用宽度（卡片位置固定后就不变），保证封面不溢出窗口
-  const leftRoom = pos ? Math.max(0, pos.left - 12) : 320
-  const rightRoom = pos ? Math.max(0, viewport.w - pos.left - 510 - 12) : 320
+  // 封面的基准几何（与 CSS 保持一致）：左 54、宽 380
+  const coverLeft = 54
+  const coverWidth = 380
+  const clampSpread = (room: number, count: number) =>
+    Math.max(48, Math.min(118, Math.floor(room / Math.max(1, count))))
+
+  // 掀开时最左/最右的封面不能越过窗口：按真实几何算可用扇开幅度
+  const leftEdge = pos ? pos.left : viewport.w / 2
+  const rightRoom = pos ? viewport.w - (pos.left + coverLeft + coverWidth) - 8 : 320
   const spreadLeft = stack.length
-    ? Math.max(54, Math.min(118, (leftRoom - 300) / Math.max(1, Math.min(stack.length, 4))))
+    ? clampSpread(leftEdge + coverLeft - 8, Math.min(stack.length, 4))
     : 118
   const spreadRight = forward.length
-    ? Math.max(54, Math.min(118, (rightRoom - 300) / Math.max(1, Math.min(forward.length, 3))))
+    ? clampSpread(rightRoom, Math.min(forward.length, 3))
     : 118
-  const showForward = rightRoom > 200
+  const showForward = rightRoom > 140
 
   // 入场动画从「被划的那段文字」位置长出来
   const enterOrigin = pos
@@ -255,7 +299,7 @@ export function Card({
 
   return (
     <div
-      className="card-stack"
+      className={`card-stack ${closing ? 'closing' : ''}`}
       style={
         pos
           ? { left: pos.left, top: pos.top }
@@ -376,7 +420,7 @@ export function Card({
             {t('前进 {n}', { n: forward.length })}
           </button>
         )}
-        <button className="icon" onClick={onClose} title={t('关闭整叠（Esc）')}>
+        <button className="icon" onClick={requestClose} title={t('关闭整叠（Esc）')}>
           ×
         </button>
       </header>
