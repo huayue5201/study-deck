@@ -188,7 +188,7 @@ export function GlossaryPanel(props: Props) {
           />
           <div className="entries">
             {props.entries.length === 0 && (
-              <p className="muted">{t('还没有条目。关掉一张卡片就会自动记账。')}</p>
+              <p className="muted">{t('还没有条目。在卡片底部点「保存到账本」才会记账。')}</p>
             )}
             {props.entries.map((entry) => {
               const group = duplicates.get(norm(entry.term)) ?? []

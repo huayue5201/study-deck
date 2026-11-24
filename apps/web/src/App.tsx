@@ -123,6 +123,14 @@ function sameMessages(a: Message[], b: Message[]): boolean {
   )
 }
 
+/** 账本标题：优先取引文的第一个短句（整段长句塞进 term 会变成垃圾条目） */
+function suggestTerm(quote: string): string {
+  const text = quote.replace(/\s+/g, ' ').trim()
+  const cut = text.slice(0, 40).search(/[，。；：、,.;:!?！？]/)
+  if (cut >= 4) return text.slice(0, cut)
+  return text.slice(0, 24)
+}
+
 /** 卡片档位是用户自定义的；账本仍按三档 Depth 记账，这里做一次映射。 */
 function depthForLevel(profile: CardProfile, level: string): Depth {
   if (level === 'can_use' || level === 'can_tune' || level === 'can_derive') return level
@@ -965,7 +973,7 @@ export default function App() {
     if (!card || card.streaming || !card.answer.trim() || card.saved) return
     try {
       await saveGlossary({
-        term: card.anchor.quote.slice(0, 80),
+        term: suggestTerm(card.anchor.quote),
         gist: stripMarkdown(card.answer).slice(0, 160),
         depth: depthForLevel(activeProfile, card.level),
         anchor: card.anchor,
@@ -1041,7 +1049,6 @@ export default function App() {
     const nestingFrom = fromCardId && card ? card : null
     const parentLocalId = nestingFrom?.localId ?? null
     const parentCardId = nestingFrom?.id ?? null
-    if (nestingFrom) await saveCard()
 
     const sameAnchor = (item: OpenCardState) =>
       item.anchor.message_id === anchor.message_id &&
@@ -1084,7 +1091,8 @@ export default function App() {
           level: existing.level ?? resolveLevel(activeProfile),
           answer: existing.answer,
           streaming: false,
-          saved: true,
+          // 有卡片不代表已记账：账本条目只由用户点「保存到账本」产生
+          saved: false,
           promotedSessionId: existing.promoted_session_id ?? null,
           parentCardId,
           parentLocalId,
@@ -1101,7 +1109,7 @@ export default function App() {
 
     // 3) 账本里已经有这个词：先把旧结论摆出来，别再花一次钱
     try {
-      const hit = await matchEntry(anchor.quote)
+      const hit = await matchEntry(suggestTerm(anchor.quote))
       if (hit) {
         const level = resolveLevel(activeProfile, hit.depth)
         const reused: OpenCardState = {
@@ -1162,10 +1170,10 @@ export default function App() {
     )
   }, [activeProfile, addCard, card, cards, focusOn, pending, runCard, saveCard, t])
 
-  const closeCard = useCallback(async () => {
-    await saveCard()
+  // 关卡片只收起界面：账本只认用户点「保存到账本」，不做自动记账
+  const closeCard = useCallback(() => {
     setFocusId(null)
-  }, [saveCard])
+  }, [])
 
   /** 跳到链上第 k 层；跳过的更深层留在树里当分支，随时能切回 */
   const jumpToLayer = useCallback(
@@ -1177,10 +1185,9 @@ export default function App() {
     [activeIndex, chain, focusOn],
   )
 
-  const backToMain = useCallback(async () => {
-    await saveCard()
+  const backToMain = useCallback(() => {
     setFocusId(null)
-  }, [saveCard])
+  }, [])
 
   // 深度 ≥3 自动钉到右侧，或用户手动钉住
   const [pinned, setPinned] = useState(false)
