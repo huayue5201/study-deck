@@ -23,6 +23,7 @@ export function SettingsPanel({ presets, settings, onSaved, onClose }: Props) {
   const [counts, setCounts] = useState<StorageCounts | null>(null)
   const [busy, setBusy] = useState(false)
   const [report, setReport] = useState<MaintenanceReport | null>(null)
+  const [err, setErr] = useState<string | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -39,10 +40,13 @@ export function SettingsPanel({ presets, settings, onSaved, onClose }: Props) {
   const runMaintain = async () => {
     if (busy) return
     setBusy(true)
+    setErr(null)
     try {
       const result = await maintainStorage()
       setReport(result.report)
       setCounts(result.counts)
+    } catch (error) {
+      setErr(String(error))
     } finally {
       setBusy(false)
     }
@@ -50,8 +54,13 @@ export function SettingsPanel({ presets, settings, onSaved, onClose }: Props) {
 
   const kb = counts ? Math.max(1, Math.round(counts.db_bytes / 1024)) : null
   const removeKey = async () => {
-    const view = await clearKey()
-    onSaved(view)
+    setErr(null)
+    try {
+      const view = await clearKey()
+      onSaved(view)
+    } catch (error) {
+      setErr(String(error))
+    }
   }
 
   return (
@@ -92,6 +101,7 @@ export function SettingsPanel({ presets, settings, onSaved, onClose }: Props) {
           <p className="muted small">
             {t('启动时自动清理：空会话（7 天以上）、指向已删会话/卡片的孤儿记录、90 天前的 token 用量。')}
           </p>
+          {err && <p className="small" style={{ color: '#ff9aa6' }}>{err}</p>}
           <div className="storage-actions">
             <button onClick={() => void runMaintain()} disabled={busy}>
               {busy ? t('清理中…') : t('清理并压缩')}

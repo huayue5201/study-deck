@@ -276,17 +276,24 @@ export function Card({
     const body = bodyRef.current
     const inner = innerRef.current
     if (!el || !body || !inner) return
-    const frame = window.requestAnimationFrame(() => {
+    const measure = () => {
       const maxHeight = Math.min(window.innerHeight * 0.66, 620)
       const style = window.getComputedStyle(body)
       const bodyPad = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
       // 卡片固定部分（头部 / 追问 / 底部）的高度
       const chrome = el.offsetHeight - body.offsetHeight
-      const desired = Math.min(Math.max(inner.offsetHeight + bodyPad + chrome, 360), maxHeight)
+      const desired = Math.min(Math.max(inner.scrollHeight + bodyPad + chrome, 360), maxHeight)
       setCardHeight((prev) => (prev !== null && Math.abs(prev - desired) < 2 ? prev : desired))
-    })
-    return () => window.cancelAnimationFrame(frame)
-  }, [card.answer, cardKey, viewport.h])
+    }
+    // 内容变高变矮都跟着走（流式 token 只改文本，不会触发每帧 setState）
+    const observer = new ResizeObserver(measure)
+    observer.observe(inner)
+    const frame = window.requestAnimationFrame(measure)
+    return () => {
+      observer.disconnect()
+      window.cancelAnimationFrame(frame)
+    }
+  }, [cardKey, viewport.h, docked])
 
   // 流式输出时正文缓动跟到底；用户主动上翻时暂停，别把人拽回去
   useEffect(() => {
@@ -315,12 +322,12 @@ export function Card({
       const typing =
         tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || Boolean(target?.isContentEditable)
 
+      if (typing) return
       if (event.key === 'Escape') {
         event.preventDefault()
         requestClose()
         return
       }
-      if (typing) return
 
       if (event.key === 'ArrowLeft' && activeIndex > 0) {
         event.preventDefault()
@@ -381,18 +388,26 @@ export function Card({
   }
   /** 同一个词分出的多支，标签会撞车：给它们编号 1/2、2/2 */
   const labelInfo = useMemo(() => {
-    const total = new Map<string, number>()
-    const ordinal = new Map<string, number>()
+    const groups = new Map<string, string[]>()
     for (const node of treeCards) {
-      const base = labelBase(node)
-      ordinal.set(node.localId, (total.get(base) ?? 0) + 1)
-      total.set(base, (total.get(base) ?? 0) + 1)
+      const key = labelBase(node)
+      const list = groups.get(key) ?? []
+      list.push(node.localId)
+      groups.set(key, list)
+    }
+    const ordinal = new Map<string, number>()
+    const total = new Map<string, number>()
+    for (const [key, ids] of groups) {
+      total.set(key, ids.length)
+      ids.forEach((id, index) => ordinal.set(id, index + 1))
     }
     return { total, ordinal }
-  }, [treeCards])
+  }, [treeCards, defaultQuestion])
   const labelOf = (node: OpenCardState, limit = 20) => {
     const base = labelBase(node, limit)
-    const count = labelInfo.total.get(base) ?? 1
+    // 编号只跟「同一句话分出的多支」有关，跟这里的截断长度无关
+    const key = labelBase(node)
+    const count = labelInfo.total.get(key) ?? 1
     return count > 1 ? `${base} ${labelInfo.ordinal.get(node.localId)}/${count}` : base
   }
   const childrenOf = useMemo(() => {
@@ -449,13 +464,20 @@ export function Card({
   }, [childrenOf])
 
   /** 侧边 rail 放哪边：优先右侧，右侧不够放左侧，两侧都窄就叠在卡内 */
+  const RAIL_LEFT = 64
+  const RAIL_RIGHT = 60
+  // 悬停展开到 208px：空间不够就叠在卡内，别溢出视口
   const railSide = !pos
-    ? 'left'
-    : pos.left >= 60
+    ? 'overlay'
+    : pos.left >= 208
       ? 'left'
-      : viewport.w - (pos.left + cardWidth) >= 60
+      : viewport.w - (pos.left + cardWidth) >= 208
         ? 'right'
-        : 'overlay'
+        : pos.left >= RAIL_LEFT
+          ? 'left'
+          : viewport.w - (pos.left + cardWidth) >= RAIL_RIGHT
+            ? 'right'
+            : 'overlay'
 
   const enterOrigin = pos
     ? `${Math.max(0, Math.min(card.rect.left + card.rect.width / 2 - pos.left, cardWidth))}px ${
@@ -498,27 +520,25 @@ export function Card({
 
       {!docked && siblings.length > 0 && (
         <aside className={`card-side side-${railSide}`} aria-label={t('平级卡片')}>
-          {siblings.length > 0 && (
-            <div className="side-group">
-              <div className="side-head">
-                <span className="side-num">L{activeIndex + 1}</span>
-                <span className="side-tag">{t('同层')}</span>
-                <span className="side-count">{siblings.length + 1}</span>
-              </div>
-              <div className="side-rows">
-                {siblings.map((node, index) => (
-                  <button
-                    key={node.localId}
-                    className={`side-item${node.streaming ? ' streaming' : ''}`}
-                    onClick={() => onFocusNode(node.localId)}
-                  >
-                    <span className="side-idx">{activeIndex + 1}.{index + 1}</span>
-                    <span className="side-quote">{node.anchor.quote.replace(/\s+/g, ' ')}</span>
-                  </button>
-                ))}
-              </div>
+          <div className="side-group">
+            <div className="side-head">
+              <span className="side-num">L{activeIndex + 1}</span>
+              <span className="side-tag">{t('同层')}</span>
+              <span className="side-count">{siblings.length + 1}</span>
             </div>
-          )}
+            <div className="side-rows">
+              {siblings.map((node, index) => (
+                <button
+                  key={node.localId}
+                  className={`side-item${node.streaming ? ' streaming' : ''}`}
+                  onClick={() => onFocusNode(node.localId)}
+                >
+                  <span className="side-idx">{activeIndex + 1}.{index + 1}</span>
+                  <span className="side-quote">{node.anchor.quote.replace(/\s+/g, ' ')}</span>
+                </button>
+              ))}
+            </div>
+          </div>
         </aside>
       )}
 

@@ -5,7 +5,6 @@ import type {
   SessionSummary,
   SettingsView,
   TestResult,
-  TurnView,
   Anchor,
   CardProfile,
   ChatBody,
@@ -451,10 +450,6 @@ export async function searchMessages(q: string): Promise<MessageHit[]> {
   return data.hits
 }
 
-export function exportUrl(format: 'md' | 'json'): string {
-  return `/api/export?format=${format}`
-}
-
 /** 导出要带 token，所以不能用裸 <a href>，走 blob 下载。 */
 export async function downloadExport(format: 'md' | 'json'): Promise<void> {
   const response = await api(`/api/export?format=${format}`)
@@ -466,16 +461,9 @@ export async function downloadExport(format: 'md' | 'json'): Promise<void> {
   document.body.appendChild(link)
   link.click()
   link.remove()
-  URL.revokeObjectURL(url)
+  // 立刻 revoke 会让 WebKit 读不到 blob，稍等一下再释放
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
-
-export async function listTurns(activeOnly = false): Promise<TurnView[]> {
-  const data = await readJson<{ turns: TurnView[] }>(
-    await api(`/api/turns${activeOnly ? '?active=1' : ''}`),
-  )
-  return data.turns
-}
-
 
 export async function listCourses(): Promise<CourseSummary[]> {
   const data = await readJson<{ courses: CourseSummary[] }>(await api('/api/courses'))

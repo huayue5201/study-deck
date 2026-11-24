@@ -47,8 +47,9 @@ export function readAnchor(): SelectionInfo | null {
   if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null
 
   const range = selection.getRangeAt(0)
-  const quote = selection.toString().trim()
-  if (!quote) return null
+  // 不要 trim：char_start/char_end 是按原始文本算的，trim 过的引文会和偏移对不上
+  const quote = selection.toString()
+  if (!quote.trim()) return null
 
   const root = closestMessage(range.commonAncestorContainer)
   if (!root) return null

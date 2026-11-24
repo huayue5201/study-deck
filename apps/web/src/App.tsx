@@ -124,6 +124,17 @@ function sameMessages(a: Message[], b: Message[]): boolean {
   )
 }
 
+/** 同一处划词：锚点四件套 + 父卡都要一致，否则会误复用/误删别的卡 */
+function sameAnchorRecord(record: CardRecord, anchor: Anchor, parentCardId: string | null): boolean {
+  return (
+    record.anchor.message_id === anchor.message_id &&
+    record.anchor.quote === anchor.quote &&
+    record.anchor.char_start === anchor.char_start &&
+    record.anchor.char_end === anchor.char_end &&
+    (record.parent_card_id ?? null) === parentCardId
+  )
+}
+
 /** 账本标题：优先取引文的第一个短句（整段长句塞进 term 会变成垃圾条目） */
 function suggestTerm(quote: string): string {
   const text = quote.replace(/\s+/g, ' ').trim()
@@ -185,21 +196,19 @@ export default function App() {
   const pendingDeleteRef = useRef<Set<string>>(new Set())
   // 会话里已经存在的卡片（用于「同一处划词直接复用」）
   const sessionCardsRef = useRef<CardRecord[]>([])
+  // cards 的同步镜像：addCard 之后要立刻能读到新节点（focusOn 靠它找根）
+  const cardsRef = useRef<Record<string, OpenCardState>>({})
+  // 正在进行的流式请求：切会话/删会话时统一中止，别把旧会话的 token 写进新会话
+  const abortersRef = useRef<Set<AbortController>>(new Set())
+  // openCard 互斥：连着划两段词时只认第一个，避免两张卡抢焦点
+  const openingRef = useRef(false)
 
   // 换会话时清空卡片树；关闭卡片栈不清（同会话内再打开还能切回分支）
   useEffect(() => {
     setCards({})
     setFocusId(null)
     rememberedFocusRef.current = {}
-    if (sessionId) {
-      try {
-        const raw = localStorage.getItem(`studydeck.focus.${sessionId}`)
-        const stored = raw ? (JSON.parse(raw) as Record<string, string>) : null
-        if (stored && typeof stored === 'object') rememberedFocusRef.current = stored
-      } catch {
-        // 坏数据直接丢掉
-      }
-    }
+    // 深层路径记忆只在本次运行内有效：里面存的是 localId，重启后对不上
     if (!sessionId) {
       sessionCardsRef.current = []
       return
@@ -304,10 +313,11 @@ export default function App() {
    * 历史卡的子树属于当时的上下文，换个上下文打开时不能继承。
    */
   useEffect(() => {
-    if (!card?.id) return
+    if (!card?.id || !card.parentLocalId) return
     const parentId = card.parentCardId ?? null
     const records = sessionCardsRef.current.filter(
       (record) =>
+        record.session_id === sessionRef.current &&
         (record.parent_card_id ?? null) === parentId &&
         record.id !== card.id &&
         !deletedIdsRef.current.has(record.id),
@@ -337,21 +347,19 @@ export default function App() {
           sourceText: '',
         }
       }
+      cardsRef.current = next
       return next
     })
   }, [card])
 
   /** 当前卡的平级卡片（同一父节点下的其它卡） */
-  const siblings = useMemo(
-    () =>
-      card
-        ? Object.values(cards).filter(
-            (item) =>
-              item.parentLocalId === card.parentLocalId && item.localId !== card.localId,
-          )
-        : [],
-    [cards, card],
-  )
+  const siblings = useMemo(() => {
+    // 根卡（L1）没有「平级」一说：它们来自聊天里不同的选区，不是同一层的兄弟
+    if (!card || !card.parentLocalId) return [] as OpenCardState[]
+    return Object.values(cards).filter(
+      (item) => item.parentLocalId === card.parentLocalId && item.localId !== card.localId,
+    )
+  }, [cards, card])
   // 同一处划词的其它根卡（第 1 层的「分支」没有父节点可挂，单独列出来）
   const treeCards = useMemo(() => Object.values(cards), [cards])
   const hasFork = useMemo(() => {
@@ -362,7 +370,11 @@ export default function App() {
     return [...counts.values()].some((count) => count > 1)
   }, [treeCards])
   const addCard = useCallback((node: OpenCardState) => {
-    setCards((prev) => ({ ...prev, [node.localId]: node }))
+    setCards((prev) => {
+      const next = { ...prev, [node.localId]: node }
+      cardsRef.current = next
+      return next
+    })
   }, [])
 
   /** 只更新某一个节点——流式中切层/切分支也不会写错卡 */
@@ -372,7 +384,10 @@ export default function App() {
         const current = prev[localId]
         if (!current) return prev
         const next = updater(current)
-        return next === current ? prev : { ...prev, [localId]: next }
+        if (next === current) return prev
+        const merged = { ...prev, [localId]: next }
+        cardsRef.current = merged
+        return merged
       })
     },
     [],
@@ -389,13 +404,14 @@ export default function App() {
         changed = true
       }
       for (const [key, node] of Object.entries(next)) {
-        // 父卡拿到真实 id 后，子卡的 parentLocalId 也跟着换成真实 id：
-        // 打开旧卡时才能用 parent_card_id 直接接上树
-        if (node.parentLocalId === localId) {
-          next[key] = { ...node, parentLocalId: realId, parentCardId: realId }
+        // parentLocalId 是内存树的键，永远保持 localId 不变（改了会断链）；
+        // 只有 parentCardId（发给接口的库 id）跟着父卡更新
+        if (node.parentLocalId === localId && node.parentCardId !== realId) {
+          next[key] = { ...node, parentCardId: realId }
           changed = true
         }
       }
+      cardsRef.current = next
       return changed ? next : prev
     })
   }, [])
@@ -408,13 +424,14 @@ export default function App() {
         return
       }
       setFocusId(localId)
+      const tree = cardsRef.current
       let root = localId
-      let cursor = cards[localId]?.parentLocalId ?? null
+      let cursor = tree[localId]?.parentLocalId ?? null
       const seen = new Set<string>([localId])
-      while (cursor && cards[cursor] && !seen.has(cursor)) {
+      while (cursor && tree[cursor] && !seen.has(cursor)) {
         seen.add(cursor)
         root = cursor
-        cursor = cards[cursor].parentLocalId
+        cursor = tree[cursor].parentLocalId
       }
       // 只记「更深」的那次：点回祖先时，之前的深层路径还能从面包屑走回去
       const previous = rememberedFocusRef.current[root]
@@ -422,33 +439,31 @@ export default function App() {
         let depth = 0
         let cursor = id ?? null
         const seen = new Set<string>()
-        while (cursor && cards[cursor] && !seen.has(cursor)) {
+        while (cursor && tree[cursor] && !seen.has(cursor)) {
           seen.add(cursor)
           depth += 1
-          cursor = cards[cursor].parentLocalId
+          cursor = tree[cursor].parentLocalId
         }
         return depth
       }
       if (!previous || depthOf(localId) >= depthOf(previous)) {
         rememberedFocusRef.current[root] = localId
-        // 冷启动也要能沿面包屑回到深层：把「子树最深处」落到本地
-        const sid = sessionRef.current
-        if (sid) {
-          try {
-            localStorage.setItem(`studydeck.focus.${sid}`, JSON.stringify(rememberedFocusRef.current))
-          } catch {
-            // 隐私模式/配额满：忽略，只影响冷启动的深层路径
-          }
-        }
       }
     },
-    [cards],
+    [],
   )
 
   // 卡片栈：祖先在下，当前卡是 card
   const [pending, setPending] = useState<PendingSelection | null>(null)
   const [streamingId, setStreamingId] = useState<string | null>(null)
+  /** 中止所有在跑的流（切会话/删会话）：否则旧流的 token 会写进新会话 */
+  const abortStreams = useCallback(() => {
+    for (const controller of abortersRef.current) controller.abort()
+    abortersRef.current.clear()
+    setStreamingId(null)
+  }, [])
   const [glossaryOpen, setGlossaryOpen] = useState(false)
+  const [pinned, setPinned] = useState(false)
   const [entries, setEntries] = useState<GlossaryEntry[]>([])
   const [query, setQuery] = useState('')
   const [flashId, setFlashId] = useState<string | null>(null)
@@ -669,7 +684,8 @@ export default function App() {
       if (!sid) return
       try {
         const view = await fetchSession(sid)
-        if (cancelled) return
+        // 请求期间切了会话：别把旧会话的消息盖到新会话上
+        if (cancelled || sid !== sessionRef.current) return
         setMessages((current) => (sameMessages(current, view.messages) ? current : view.messages))
         setUsage(view.usage ?? null)
         setOrigin((current) =>
@@ -689,7 +705,7 @@ export default function App() {
       window.clearInterval(timer)
       window.removeEventListener('focus', refresh)
     }
-  }, [topicPageId, coursePageId, streamingId])
+  }, [topicPageId, coursePageId, streamingId, sessionId])
 
   useEffect(() => {
     void refreshTopics()
@@ -725,6 +741,7 @@ export default function App() {
       setTopicPageId(null)
       return
     }
+    abortStreams()
     try {
       const view = await fetchSession(id)
       localStorage.setItem('studydeck.session', view.id)
@@ -738,9 +755,10 @@ export default function App() {
     } catch (err) {
       setError(String(err))
     }
-  }, [])
+  }, [abortStreams])
 
   const newSession = useCallback(async () => {
+    abortStreams()
     try {
       const id = await createSession()
       const view = await fetchSession(id)
@@ -756,7 +774,7 @@ export default function App() {
     } catch (err) {
       setError(String(err))
     }
-  }, [refreshSessions])
+  }, [abortStreams, refreshSessions])
 
   const deletingRef = useRef<Set<string>>(new Set())
 
@@ -765,6 +783,7 @@ export default function App() {
     deletingRef.current.add(id)
     // 删除前先记住"它是不是当前会话"：await 之后 sessionRef 可能已经变了
     const wasCurrent = id === sessionRef.current
+    if (wasCurrent) abortStreams()
     try {
       await deleteSession(id)
       const recent = await listSessions()
@@ -788,7 +807,7 @@ export default function App() {
     } finally {
       deletingRef.current.delete(id)
     }
-  }, [refreshSessions])
+  }, [abortStreams, refreshSessions])
 
   useEffect(() => {
     if (!menuOpen) return
@@ -908,6 +927,8 @@ export default function App() {
     ])
     assistantIdRef.current = draft.id
     setStreamingId(draft.id)
+    const controller = new AbortController()
+    abortersRef.current.add(controller)
 
     try {
       await streamChat({ session_id: sid, mode: 'main', text, locale: lang }, (frame) => {
@@ -934,7 +955,7 @@ export default function App() {
         if (frame.type === 'tool_call') beginTool(frame.name, frame.args)
         if (frame.type === 'tool_done') finishTool(frame.name, frame.ok)
         if (frame.type === 'error') setError(frame.message)
-      })
+      }, controller.signal)
 
       if (options?.saveOutline && topic?.id && streamed.trim()) {
         const updated = await updateTopic(topic.id, { outline_md: streamed })
@@ -943,8 +964,9 @@ export default function App() {
         await refreshTopics()
       }
     } catch (err) {
-      setError(String(err))
+      if (!controller.signal.aborted) setError(String(err))
     } finally {
+      abortersRef.current.delete(controller)
       setStreamingId(null)
       clearTool()
       void refreshSessions()
@@ -971,6 +993,8 @@ export default function App() {
     ) => {
       const sid = sessionRef.current
       if (!sid) return
+      const controller = new AbortController()
+      abortersRef.current.add(controller)
       updateCard(targetLocalId, (current) => ({
         ...current,
         answer:
@@ -1014,10 +1038,12 @@ export default function App() {
               }))
             }
           },
+          controller.signal,
         )
       } catch (err) {
-        setError(String(err))
+        if (!controller.signal.aborted) setError(String(err))
       } finally {
+        abortersRef.current.delete(controller)
         updateCard(targetLocalId, (current) => ({ ...current, streaming: false }))
         clearTool()
       }
@@ -1026,8 +1052,13 @@ export default function App() {
         try {
           const view = await fetchSession(sid)
           sessionCardsRef.current = view.cards
+          // 精确到偏移和父卡，并按时间取最新一条（同一段文字可能出现多次）
           const matched = view.cards
-            .filter((item) => item.anchor.message_id === anchor.message_id && item.anchor.quote === anchor.quote)
+            .filter(
+              (item) =>
+                item.session_id === sid && sameAnchorRecord(item, anchor, parentCardId ?? null),
+            )
+            .sort((a, b) => a.created_at.localeCompare(b.created_at))
             .pop()
           if (matched) {
             if (pendingDeleteRef.current.has(targetLocalId)) {
@@ -1172,7 +1203,8 @@ export default function App() {
   /** 删除一张卡及其所有子卡；焦点退回最近的存活祖先 */
   const deleteNode = useCallback(
     (localId: string) => {
-      const node = cards[localId]
+      const tree = cardsRef.current
+      const node = tree[localId]
       if (!node) return
       const doomed = new Set<string>()
       const stack = [localId]
@@ -1180,9 +1212,17 @@ export default function App() {
         const id = stack.pop() as string
         if (doomed.has(id)) continue
         doomed.add(id)
-        for (const item of Object.values(cards)) {
+        for (const item of Object.values(tree)) {
           if (item.parentLocalId === id) stack.push(item.localId)
         }
+      }
+      const doomedDbIds = new Set<string>()
+      for (const id of doomed) {
+        const item = tree[id]
+        if (!item) continue
+        // 记下来：之后 seedSiblings / 复用缓存都别再把这些卡捞回来
+        deletedIdsRef.current.add(item.id ?? item.localId)
+        if (item.id) doomedDbIds.add(item.id)
       }
       for (const [root, deepest] of Object.entries(rememberedFocusRef.current)) {
         if (doomed.has(deepest) || doomed.has(root)) delete rememberedFocusRef.current[root]
@@ -1190,35 +1230,42 @@ export default function App() {
       setCards((prev) => {
         const next = { ...prev }
         for (const id of doomed) delete next[id]
+        cardsRef.current = next
         return next
       })
+      sessionCardsRef.current = sessionCardsRef.current.filter((item) => !doomedDbIds.has(item.id))
       if (focusId && doomed.has(focusId)) {
         let cursor: string | null = node.parentLocalId
         while (cursor && doomed.has(cursor)) {
-          cursor = cards[cursor]?.parentLocalId ?? null
+          cursor = tree[cursor]?.parentLocalId ?? null
         }
+        // 祖先可能已经不在树里（历史卡），退到最上层可用节点
+        if (cursor && !tree[cursor]) cursor = null
         setFocusId(cursor)
       }
-      if (node.id) {
-        deletedIdsRef.current.add(node.id)
-        sessionCardsRef.current = sessionCardsRef.current.filter((item) => !doomed.has(item.id))
-        void deleteCard(node.id).catch(() => undefined)
-      } else if (node.streaming) {
+      for (const id of doomedDbIds) {
+        // 服务端会级联删子树；失败不回滚 UI，但别吞成 unhandled rejection
+        void deleteCard(id).catch(() => undefined)
+      }
+      if (!node.id && node.streaming) {
         // 还没落库（id 未知）：等 runCard 拿到 id 后再删，别让它留成孤儿
         pendingDeleteRef.current.add(localId)
       }
     },
-    [cards, focusId],
+    [focusId],
   )
 
   const openCard = useCallback(async () => {
-    if (!pending) return
+    if (!pending || openingRef.current) return
+    openingRef.current = true
+    try {
     const { anchor, rect, sourceText, fromCardId } = pending
     setPending(null)
     window.getSelection()?.removeAllRanges()
 
-    // 嵌套展开：选区在当前卡里。父卡可能还没落库（id 为空），用 localId 连树
-    const nestingFrom = fromCardId && card ? card : null
+    // 嵌套展开：选区确实来自当前这张卡（否则说明已经切层了，别挂错父卡）
+    const nestingFrom =
+      fromCardId && card && (fromCardId === card.id || fromCardId === card.localId) ? card : null
     const parentLocalId = nestingFrom?.localId ?? null
     const parentCardId = nestingFrom?.id ?? null
 
@@ -1245,13 +1292,7 @@ export default function App() {
     // 2) 数据库里已有同一处划词（父卡已经有真实 id 才能可靠比对）
     if (!nestingFrom || parentCardId) {
       const existing = sessionCardsRef.current.find(
-        (item) =>
-          item.session_id === sessionRef.current &&
-          (item.parent_card_id ?? null) === parentCardId &&
-          item.anchor.message_id === anchor.message_id &&
-          item.anchor.quote === anchor.quote &&
-          item.anchor.char_start === anchor.char_start &&
-          item.anchor.char_end === anchor.char_end,
+        (item) => item.session_id === sessionRef.current && sameAnchorRecord(item, anchor, parentCardId),
       )
       if (existing) {
         if (land((item) => item.id === existing.id)) return
@@ -1340,11 +1381,15 @@ export default function App() {
       parentCardId,
       nestingFrom?.answer ?? null,
     )
-  }, [activeProfile, addCard, card, cards, focusOn, pending, runCard, saveCard, t])
+    } finally {
+      openingRef.current = false
+    }
+  }, [activeProfile, addCard, card, cards, focusOn, pending, runCard, t])
 
   // 关卡片只收起界面：账本只认用户点「保存到账本」，不做自动记账
   const closeCard = useCallback(() => {
     setFocusId(null)
+    setPinned(false)
   }, [])
 
   /** 跳到链上第 k 层；跳过的更深层留在树里当分支，随时能切回 */
@@ -1357,14 +1402,16 @@ export default function App() {
     [activeIndex, chain, focusOn],
   )
 
-  const backToMain = useCallback(() => {
-    setFocusId(null)
-  }, [])
+  // 「回到主线」和关闭卡片是同一件事，别再留两份实现
+  const backToMain = closeCard
 
-  // 深度 ≥3 自动钉到右侧，或用户手动钉住
-  const [pinned, setPinned] = useState(false)
   // 只有手动钉住才进 dock（不再按层数自动切）
   const docked = Boolean(card) && pinned
+
+  // 切层/关卡后，之前那一下划词就不算数了：否则会把新卡挂到别的卡下面
+  useEffect(() => {
+    setPending(null)
+  }, [focusId])
 
   // Esc 关闭卡片由 Card 自己处理（它要先播退场动画），这里只负责取消划词浮层
   useEffect(() => {
@@ -1591,7 +1638,7 @@ export default function App() {
               />
             )}
 
-            <main className={`main ${glossaryOpen ? 'with-drawer' : ''}`}>
+            <main className="main">
         <section className="chat">
           <MessageList
             messages={messages}

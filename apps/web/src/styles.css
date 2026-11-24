@@ -144,6 +144,8 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
   display: flex; flex-direction: column; gap: 1px;
   padding: 10px 6px; overflow-y: auto;
   background: rgba(0, 0, 0, 0.18);
+  /* .card-stack.docked 整体 pointer-events:none，树要自己接回来 */
+  pointer-events: auto;
 }
 .card-tree-head {
   font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase;
@@ -398,10 +400,10 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
 .card-depth-badge {
   flex: 0 0 auto; font-size: 9.5px; letter-spacing: 0.06em; color: var(--accent);
   background: rgba(225, 180, 106, 0.08); border: 1px solid rgba(225, 180, 106, 0.28);
-  border-radius: 999px; padding: 2px 8px; cursor: pointer; white-space: nowrap;
+  border-radius: 999px; padding: 2px 8px; white-space: nowrap;
 }
-.card-depth-badge:hover,
-.card-depth-badge.active { background: rgba(225, 180, 106, 0.16); border-color: rgba(225, 180, 106, 0.55); }
+/* 钉住按钮：只有它可点，深度徽标只是状态 */
+.icon.card-dock.active { color: var(--accent); border-color: rgba(225, 180, 106, 0.45); }
 
 .card-depth {
   margin: 9px 14px 2px; padding: 3px; gap: 3px;
@@ -574,11 +576,6 @@ button.primary { background: var(--accent); color: #08101f; border-color: var(--
 .modal-foot {
   display: flex; align-items: center; justify-content: space-between;
   margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line);
-}
-
-.session-picker {
-  background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
-  border-radius: 8px; padding: 5px 8px; font-size: 12.5px; max-width: 260px;
 }
 
 /* ---------- 账本管理 ---------- */
@@ -1051,12 +1048,6 @@ button.danger { color: #e6a49b; border-color: rgba(217, 141, 130, 0.35); }
 .composer-status .status-model,
 .composer-status .status-usage { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .composer-status .status-usage { flex: 0 0 auto; }
-.topbar-model {
-  display: inline-flex; align-items: center; gap: 7px;
-  color: var(--faint); font-size: 10.5px; padding: 5px 9px;
-  border: 1px solid var(--line); border-radius: 999px; background: rgba(27, 24, 20, 0.7);
-  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
 
 
 /* ---------- reading canvas ---------- */
@@ -1287,12 +1278,6 @@ button.link { color: var(--accent); }
   position: absolute; top: 16px; right: 18px;
   background: var(--bg); color: var(--muted); border: 1px solid var(--line);
   border-radius: 8px; padding: 5px 8px; font: inherit; font-size: 11.5px;
-}
-.topbar-usage {
-  flex: 0 0 auto;
-  color: var(--faint); font-size: 10.5px; font-variant-numeric: tabular-nums;
-  padding: 5px 8px; border: 1px solid var(--line); border-radius: 999px;
-  background: rgba(27, 24, 20, 0.55); white-space: nowrap;
 }
 
 /* ---------- 卡片模板编辑器 ---------- */
@@ -1565,7 +1550,6 @@ button.badge.encounters { color: var(--accent); border-color: rgba(225, 180, 106
 
 @media (max-width: 900px) {
   .topbar { padding: 0 14px; gap: 9px; }
-  .topbar-model { display: none; }
   .messages { padding: 28px 18px 34px; }
   .composer { padding: 0 18px 18px; }
   .topic-page { padding: 24px 18px 38px; }
