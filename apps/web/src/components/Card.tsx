@@ -23,16 +23,13 @@ export interface OpenCardState {
 
 interface Props {
   card: OpenCardState
-  /** 祖先卡片（栈底在前），用于扇形叠放与面包屑 */
-  stack: OpenCardState[]
-  /** 回退时让出位置的更深层卡片（可以再前进回去） */
-  forward: OpenCardState[]
+  /** 整条链：祖先 → 当前 → 可前进 */
+  chain: OpenCardState[]
+  activeIndex: number
   profile: CardProfile
   onClose: () => void
-  /** 回到第 index 个祖先（0 = 最外层） */
-  onPopTo: (index: number) => void
-  /** 前进到退下来时被让出的那张卡 */
-  onForward: () => void
+  /** 跳到链上第 index 层 */
+  onJump: (index: number) => void
   onBackToMain: () => void
   /** 在卡片正文里划词，准备嵌套展开 */
   onSelectInCard: () => void
@@ -63,12 +60,11 @@ function clampToViewport(
 
 export function Card({
   card,
-  stack,
-  forward,
+  chain,
+  activeIndex,
   profile,
   onClose,
-  onPopTo,
-  onForward,
+  onJump,
   onBackToMain,
   onSelectInCard,
   onDepthChange,
@@ -201,13 +197,15 @@ export function Card({
     }
   }
 
-  const depth = stack.length + 1
-  // Cover Flow：祖先卡做成斜置的「封面」，离当前卡越远越深越小
-  const covers = stack.slice(-4).map((ancestor, index) => ({
-    ancestor,
-    index: stack.length - Math.min(stack.length, 4) + index,
-    order: stack.length - index,
-  }))
+  const stack = chain.slice(0, activeIndex)
+  const forward = chain.slice(activeIndex + 1)
+  const depth = activeIndex + 1
+
+  // 祖先卡做成斜置封面：索引直接对应链上的层号
+  const covers = stack.slice(-4).map((ancestor, index) => {
+    const k = stack.length - Math.min(stack.length, 4) + index
+    return { ancestor, index: k, order: stack.length - k }
+  })
   const hiddenCovers = Math.max(0, stack.length - 4)
 
   // 入场动画从「被划的那段文字」位置长出来
@@ -227,17 +225,34 @@ export function Card({
       }
       onWheel={(event) => event.stopPropagation()}
     >
+      {chain.length > 1 && (
+        <nav className="card-rail" aria-label={t('卡片链')}>
+          {chain.map((item, k) => (
+            <button
+              key={`rail-${item.id ?? item.anchor.quote}-${k}`}
+              className={`rail-item ${k === activeIndex ? 'active' : ''}`}
+              onClick={() => onJump(k)}
+              title={t('第 {n} 层：{text}', { n: k + 1, text: item.anchor.quote })}
+            >
+              <span className="rail-num">L{k + 1}</span>
+              <span className="rail-quote">{item.anchor.quote.slice(0, 20)}</span>
+            </button>
+          ))}
+        </nav>
+      )}
+
       <div className={`card-deck ${deckOpen ? 'deck-fan' : ''}`}>
         {forward.map((item, index) => (
           <button
             key={`fwd-${item.id ?? item.anchor.quote}-${index}`}
             className="card-cover forward"
             style={{ '--d': index + 1 } as React.CSSProperties}
-            onClick={onForward}
+            onClick={() => onJump(activeIndex + 1 + index)}
             title={t('前进到：{text}', { text: item.anchor.quote.slice(0, 40) })}
           >
             <span className="cover-head">
-              <span className="cover-level">{t('第 {n} 层', { n: stack.length + 2 + index })}</span>
+              <span className="cover-level">L{activeIndex + 2 + index}</span>
+              <span className="cover-tab">{item.anchor.quote.slice(0, 8)}</span>
             </span>
             <span className="cover-quote">{item.anchor.quote.slice(0, 42)}</span>
             <span className="cover-gist">
@@ -258,7 +273,7 @@ export function Card({
             key={`${ancestor.id ?? ancestor.anchor.quote}-${index}`}
             className="card-cover"
             style={{ '--d': order } as React.CSSProperties}
-            onClick={() => onPopTo(index)}
+            onClick={() => onJump(index)}
             title={t('回到：{text}', { text: ancestor.anchor.quote.slice(0, 40) })}
           >
             <span className="cover-head">
@@ -309,7 +324,7 @@ export function Card({
         {forward.length > 0 && (
           <button
             className="card-forward"
-            onClick={onForward}
+            onClick={() => onJump(activeIndex + 1)}
             title={t('前进：回到刚才退下来的卡')}
           >
             {t('前进 {n}', { n: forward.length })}
@@ -327,7 +342,7 @@ export function Card({
         {stack.map((ancestor, index) => (
           <span key={`${ancestor.id ?? index}`} className="crumb-wrap">
             <span className="crumb-sep">›</span>
-            <button className="crumb" onClick={() => onPopTo(index)}>
+            <button className="crumb" onClick={() => onJump(index)}>
               {ancestor.anchor.quote.slice(0, 14)}
             </button>
           </span>

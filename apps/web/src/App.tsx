@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Composer } from './components/Composer'
 import { Sidebar } from './components/Sidebar'
 import { OriginBanner } from './components/OriginBanner'
@@ -926,33 +926,26 @@ export default function App() {
     setForwardStack([])
   }, [saveCard])
 
-  /** 回到第 index 个祖先：当前卡先落账，越过的层收进前进栈，不销毁。 */
-  const popTo = useCallback(
-    async (index: number) => {
-      await saveCard()
-      const ancestor = cardStack[index]
-      if (!ancestor) return
-      const dropped = [...cardStack.slice(index + 1).reverse(), card].filter(
-        (item): item is OpenCardState => Boolean(item),
-      )
-      setForwardStack((prev) => [...dropped, ...prev])
-      setCardStack((prev) => prev.slice(0, index))
-      cardIdRef.current = ancestor.id
-      setCard({ ...ancestor, saved: true })
-    },
-    [card, cardStack, saveCard],
+  /** 整条学习链：祖先 → 当前 → 可前进 */
+  const chain = useMemo(
+    () => [...cardStack, ...(card ? [card] : []), ...forwardStack],
+    [card, cardStack, forwardStack],
   )
+  const activeIndex = cardStack.length
 
-  /** 前进一层（回到刚才退下来的那张卡）。 */
-  const goForward = useCallback(async () => {
-    const [next, ...rest] = forwardStack
-    if (!next) return
-    await saveCard()
-    setCardStack((prev) => (card ? [...prev, { ...card, saved: true }] : prev))
-    setForwardStack(rest)
-    cardIdRef.current = next.id
-    setCard({ ...next, saved: true })
-  }, [card, forwardStack, saveCard])
+  /** 跳到链上第 k 层；不销毁任何卡，随时可以再跳回来。 */
+  const jumpToLayer = useCallback(
+    async (k: number) => {
+      const target = chain[k]
+      if (!target || k === activeIndex) return
+      await saveCard()
+      setCardStack(chain.slice(0, k))
+      setCard(target)
+      setForwardStack(chain.slice(k + 1))
+      cardIdRef.current = target.id
+    },
+    [activeIndex, chain, saveCard],
+  )
 
   const backToMain = useCallback(async () => {
     await saveCard()
@@ -1260,12 +1253,11 @@ export default function App() {
 
       <CardLayer
         card={card}
-        stack={cardStack}
-        forward={forwardStack}
+        chain={chain}
+        activeIndex={activeIndex}
         profile={activeProfile}
         onClose={() => void closeCard()}
-        onPopTo={(index) => void popTo(index)}
-        onForward={() => void goForward()}
+        onJump={(index) => void jumpToLayer(index)}
         onBackToMain={() => void backToMain()}
         onSelectInCard={handleMouseUp}
         onDepthChange={(level) => {

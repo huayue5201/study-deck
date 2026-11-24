@@ -353,6 +353,8 @@ const EN: Record<string, string> = {
   '前进 {n}': 'Forward {n}',
   '前进：回到刚才退下来的卡': 'Forward: reopen the card you came back from',
   '前进到：{text}': 'Forward to: {text}',
+  '卡片链': 'Card chain',
+  '第 {n} 层：{text}': 'Level {n}: {text}',
 }
 
 function interpolate(text: string, vars?: Record<string, string | number>): string {

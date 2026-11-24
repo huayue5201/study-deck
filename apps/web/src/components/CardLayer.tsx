@@ -3,12 +3,12 @@ import { Card, type OpenCardState } from './Card'
 
 interface Props {
   card: OpenCardState | null
-  stack: OpenCardState[]
-  forward: OpenCardState[]
+  /** 整条链：祖先 → 当前 → 可前进 */
+  chain: OpenCardState[]
+  activeIndex: number
   profile: CardProfile
   onClose: () => void
-  onPopTo: (index: number) => void
-  onForward: () => void
+  onJump: (index: number) => void
   onBackToMain: () => void
   onSelectInCard: () => void
   onDepthChange: (level: string) => void
@@ -21,12 +21,11 @@ interface Props {
 
 export function CardLayer({
   card,
-  stack,
-  forward,
+  chain,
+  activeIndex,
   profile,
   onClose,
-  onPopTo,
-  onForward,
+  onJump,
   onBackToMain,
   onSelectInCard,
   onDepthChange,
@@ -41,12 +40,11 @@ export function CardLayer({
     <div className="card-layer">
       <Card
         card={card}
-        stack={stack}
-        forward={forward}
+        chain={chain}
+        activeIndex={activeIndex}
         profile={profile}
         onClose={onClose}
-        onPopTo={onPopTo}
-        onForward={onForward}
+        onJump={onJump}
         onBackToMain={onBackToMain}
         onSelectInCard={onSelectInCard}
         onDepthChange={onDepthChange}
