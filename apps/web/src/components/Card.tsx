@@ -75,6 +75,10 @@ export function Card({
   const { t } = useI18n()
   const [draft, setDraft] = useState('')
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
+  // 悬停时把下面的卡「扇」出来，方便自由选层
+  const [peekOpen, setPeekOpen] = useState(false)
+  const lastHeight = useRef(0)
+  const lastHeightAt = useRef(0)
   const ref = useRef<HTMLDivElement | null>(null)
   const drag = useRef<{ dx: number; dy: number } | null>(null)
 
@@ -133,6 +137,25 @@ export function Card({
     const observer = new ResizeObserver(() => {
       const width = el.offsetWidth
       const height = el.offsetHeight
+      // 流式输出让卡片一节一节变高；补一段 180ms 的高度动画，
+      // 避免每次换行/新一段都"跳"一下。
+      const now = performance.now()
+      if (
+        lastHeight.current > 0 &&
+        Math.abs(height - lastHeight.current) > 8 &&
+        now - lastHeightAt.current > 160
+      ) {
+        lastHeightAt.current = now
+        try {
+          el.animate(
+            [{ height: `${lastHeight.current}px` }, { height: `${height}px` }],
+            { duration: 180, easing: 'cubic-bezier(.2,.9,.3,1)' },
+          )
+        } catch {
+          // 老 WebView 不支持 WAAPI 就算了，不影响功能
+        }
+      }
+      lastHeight.current = height
       setPos((current) => {
         if (!current) return current
         const next = clampToViewport(current.left, current.top, width, height)
@@ -194,33 +217,59 @@ export function Card({
   }))
   const hiddenAbove = Math.max(0, stack.length - 2)
 
+  // 入场动画从「被划的那段文字」位置长出来
+  const enterOrigin = pos
+    ? `${Math.max(0, Math.min(card.rect.left + card.rect.width / 2 - pos.left, 510))}px ${
+        Math.max(-40, Math.min(card.rect.top - pos.top, 420))
+      }px`
+    : '50% 0%'
+
   return (
     <div
-      className="card-stack"
-      style={pos ? { left: pos.left, top: pos.top } : { visibility: 'hidden' }}
+      className={`card-stack ${peekOpen ? 'peeks-open' : ''}`}
+      style={
+        pos
+          ? { left: pos.left, top: pos.top }
+          : { visibility: 'hidden' }
+      }
+      onMouseLeave={() => setPeekOpen(false)}
       onWheel={(event) => event.stopPropagation()}
     >
+      {stack.length > 0 && (
+        <div
+          className="peek-hover-zone"
+          onMouseEnter={() => setPeekOpen(true)}
+          title={t('悬停展开卡片堆')}
+        />
+      )}
       {visiblePeeks.map(({ ancestor, index, offset }) => (
         <button
           key={`${ancestor.id ?? ancestor.anchor.quote}-${index}`}
           className="card-peek"
-          style={{
-            left: 12 + offset * 9,
-            right: 12 + offset * 9,
-            transform: `translateY(${-offset * 11}px)`,
-            opacity: 0.45 + offset * 0.15,
-            zIndex: 10 - offset,
-          }}
+          style={
+            {
+              '--i': offset,
+              left: 12 + offset * 9,
+              right: 12 + offset * 9,
+            } as React.CSSProperties
+          }
           onClick={() => onPopTo(index)}
           title={t('回到：{text}', { text: ancestor.anchor.quote.slice(0, 40) })}
         >
-          {hiddenAbove > 0 && offset === 2 ? `+${hiddenAbove}` : ''}
+          <span className="peek-label">
+            {t('第 {n} 层', { n: stack.length - (stack.length - 1 - index) })}
+            {' · '}
+            {ancestor.anchor.quote.slice(0, 24)}
+          </span>
+          {hiddenAbove > 0 && offset === 2 && <span className="peek-more">+{hiddenAbove}</span>}
         </button>
       ))}
 
       <div
         className="card"
+        key={card.anchor.quote + (card.parentCardId ?? '')}
         ref={ref}
+        style={{ '--enter-origin': enterOrigin } as React.CSSProperties}
         onMouseUp={(event) => {
           event.stopPropagation()
           onSelectInCard()
@@ -237,7 +286,13 @@ export function Card({
         <div className="card-term" title={card.anchor.quote}>
           {card.anchor.quote.slice(0, 60)}
         </div>
-        <span className="card-depth-badge">{t('第 {n} 层', { n: depth })}</span>
+        <button
+          className={`card-depth-badge ${peekOpen ? 'active' : ''}`}
+          onClick={() => setPeekOpen((value) => !value)}
+          title={stack.length > 0 ? t('展开卡片堆（{n} 层）', { n: stack.length }) : t('第 {n} 层', { n: depth })}
+        >
+          {t('第 {n} 层', { n: depth })}
+        </button>
         <button className="icon" onClick={onClose} title={t('关闭整叠（Esc）')}>
           ×
         </button>

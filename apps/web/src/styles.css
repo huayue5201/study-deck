@@ -125,31 +125,56 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
   position: fixed; z-index: 50; pointer-events: none;
 }
 .card-stack .card { pointer-events: auto; }
+/* 堆叠：默认只露纸边；悬停/点层级徽标后「扇开」，每张都能点 */
 .card-peek {
-  position: absolute; top: 0; height: 30px;
-  display: flex; align-items: flex-start; justify-content: center;
-  padding: 4px 0 0;
-  font-size: 10px; color: var(--faint); letter-spacing: 0.04em;
+  position: absolute; top: 0; height: 28px; z-index: calc(10 - var(--i));
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 0 14px;
+  font-size: 10px; color: var(--muted); letter-spacing: 0.03em;
   background: linear-gradient(180deg, var(--panel-2), var(--panel));
   border: 1px solid var(--line); border-bottom: none;
   border-radius: 12px 12px 0 0; cursor: pointer;
   pointer-events: auto; white-space: nowrap; overflow: hidden;
   box-shadow: 0 -6px 16px rgba(0, 0, 0, 0.22);
-  transform-origin: 50% 100%;
-  transition: transform 0.16s ease, opacity 0.16s ease, border-color 0.16s ease;
+  transform: translateY(calc(var(--i) * -12px));
+  transition:
+    transform 0.2s cubic-bezier(0.2, 0.9, 0.3, 1),
+    height 0.2s ease,
+    opacity 0.2s ease,
+    border-color 0.2s ease;
 }
-.card-peek:hover { opacity: 1 !important; border-color: var(--accent); color: var(--text); }
+.card-peek .peek-label {
+  opacity: 0; overflow: hidden; text-overflow: ellipsis;
+  transition: opacity 0.14s ease;
+}
+.card-peek:hover { border-color: var(--accent); color: var(--text); }
+.card-stack.peeks-open .card-peek {
+  height: 34px; opacity: 1 !important; color: var(--text);
+  transform: translateY(calc(var(--i) * -48px));
+}
+.card-stack.peeks-open .card-peek .peek-label { opacity: 1; }
+.peek-hover-zone {
+  position: absolute; left: 8px; right: 8px; top: -40px; height: 40px;
+  z-index: 30; pointer-events: auto;
+}
+.card-stack.peeks-open .peek-hover-zone { pointer-events: none; }
+.peek-more { color: var(--accent); font-size: 10px; }
+
 .card { box-shadow: 0 22px 48px rgba(0, 0, 0, 0.55); }
 @keyframes card-in {
-  from { opacity: 0; transform: translateY(6px) scale(0.985); }
-  to { opacity: 1; transform: none; }
+  from { opacity: 0; transform: scale(0.88) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
 }
-.card-stack .card { animation: card-in 0.16s ease-out; }
+.card-stack .card { animation: card-in 0.22s cubic-bezier(0.18, 0.9, 0.28, 1); transform-origin: var(--enter-origin, 50% 0%); }
 .peek-more { color: var(--accent); font-size: 10px; }
 .card-depth-badge {
   font-size: 10px; color: var(--faint); letter-spacing: 0.06em;
-  border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px;
-  flex: 0 0 auto;
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px;
+  flex: 0 0 auto; background: transparent; cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.card-depth-badge:hover, .card-depth-badge.active {
+  color: var(--accent); border-color: rgba(225, 180, 106, 0.5);
 }
 .card-breadcrumb { display: flex; align-items: center; gap: 4px; flex-wrap: nowrap; overflow: hidden; }
 .card-breadcrumb .crumb {

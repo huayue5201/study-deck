@@ -346,6 +346,8 @@ const EN: Record<string, string> = {
   '由名称生成，稳定且唯一': 'Generated from the name; stable and unique',
   '会按这个顺序注入「严格按以下小节输出」': 'Injected in this order as “output strictly in these sections”',
   '你是「卡片」…': 'You are the card…',
+  '悬停展开卡片堆': 'Hover to fan out the stack',
+  '展开卡片堆（{n} 层）': 'Fan out the stack ({n} cards)',
 }
 
 function interpolate(text: string, vars?: Record<string, string | number>): string {
