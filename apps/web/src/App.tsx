@@ -255,22 +255,48 @@ export default function App() {
   }, [cards, focusId])
   const card = chain.length > 0 ? chain[chain.length - 1] : null
 
-  /** 当前节点之后的下行路径（上次走过的那条）：面包屑不清空，点一下就能回去 */
+  /**
+   * 当前节点之后的下行路径。两条来源，缺一不可：
+   * 1) 上次走过的那条（点回祖先时，刚刚的路径不能凭空消失）；
+   * 2) 没走过时，沿「唯一子卡」往下补（只有一个去处 = 没有歧义，直接摆出来）。
+   * 有多个去处时留空，交给侧 rail 让用户选。
+   */
   const descendantPath = useMemo(() => {
     if (!card) return [] as OpenCardState[]
+    const out: OpenCardState[] = []
+    const seen = new Set<string>([card.localId])
+
     const root = chain[0]?.localId
     const deepest = root ? rememberedFocusRef.current[root] : null
-    if (!deepest || !cards[deepest]) return [] as OpenCardState[]
-    const path: OpenCardState[] = []
-    let cursor: string | null = deepest
-    const seen = new Set<string>()
-    while (cursor && cards[cursor] && !seen.has(cursor)) {
-      seen.add(cursor)
-      path.unshift(cards[cursor])
-      cursor = cards[cursor].parentLocalId
+    if (deepest && cards[deepest]) {
+      const up: OpenCardState[] = []
+      let cursor: string | null = deepest
+      const guard = new Set<string>()
+      while (cursor && cards[cursor] && !guard.has(cursor)) {
+        guard.add(cursor)
+        up.unshift(cards[cursor])
+        cursor = cards[cursor].parentLocalId
+      }
+      const at = up.findIndex((node) => node.localId === card.localId)
+      if (at >= 0) {
+        for (const node of up.slice(at + 1)) {
+          out.push(node)
+          seen.add(node.localId)
+        }
+      }
     }
-    const at = path.findIndex((node) => node.localId === card.localId)
-    return at >= 0 ? path.slice(at + 1) : []
+
+    let cursor = out.length > 0 ? out[out.length - 1].localId : card.localId
+    for (let step = 0; step < 8; step += 1) {
+      const kids = Object.values(cards).filter(
+        (node) => node.parentLocalId === cursor && !seen.has(node.localId),
+      )
+      if (kids.length !== 1) break
+      out.push(kids[0])
+      seen.add(kids[0].localId)
+      cursor = kids[0].localId
+    }
+    return out
   }, [cards, card, chain, focusId])
   const activeIndex = chain.length - 1
 
