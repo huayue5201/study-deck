@@ -210,41 +210,8 @@ export default function App() {
         if (!alive) return
         // 冷启动也要有账本缓存，否则同锚点复用永远不命中，每次重开都白花一次模型调用
         sessionCardsRef.current = view.cards
-        // 会话里已有的卡片直接铺进树：不然「同层/下一层」要等你一层层走一遍才出现，
-        // 重新打开一张旧卡时侧栏永远是空的
-        setCards((prev) => {
-          const next: Record<string, OpenCardState> = { ...prev }
-          for (const record of view.cards) {
-            const base: OpenCardState = {
-              localId: record.id,
-              id: record.id,
-              anchor: record.anchor,
-              level: record.level ?? '',
-              question: record.question,
-              answer: record.answer,
-              streaming: false,
-              saved: false,
-              promotedSessionId: record.promoted_session_id ?? null,
-              parentCardId: record.parent_card_id ?? null,
-              parentLocalId: record.parent_card_id ?? null,
-              parentText: null,
-              rect: { left: 0, top: 0, width: 0, height: 0 },
-              sourceText: '',
-            }
-            // 本地正在流式的节点优先：别用库里的半截答案盖掉
-            const local = next[record.id]
-            next[record.id] = local ? { ...base, ...local, id: record.id, localId: record.id } : base
-          }
-          // 父卡在本地先出现时，子卡记的是 parentLocalId；父卡落库后改回真实 id
-          const realIdOf = (key: string | null) => (key && next[key]?.id ? next[key].id! : key)
-          for (const [key, node] of Object.entries(next)) {
-            const parentLocalId = realIdOf(node.parentLocalId)
-            if (parentLocalId !== node.parentLocalId) {
-              next[key] = { ...node, parentLocalId, parentCardId: parentLocalId }
-            }
-          }
-          return next
-        })
+        // 只把卡片记录留作「内容复用」的缓存；**不铺进树**。
+        // 历史卡的子孙属于当时的上下文，换个上下文再打开不该继承。
       })
       .catch(() => {})
     return () => {
@@ -329,7 +296,52 @@ export default function App() {
   }, [cards, card, chain, focusId])
   const activeIndex = chain.length - 1
 
-  /** 当前卡的平级卡片（同一父节点下的其它卡）与已经展开的下一层 */
+  /** 这一层打开过、但已经删掉的卡：别再从缓存里捞回来 */
+  const deletedIdsRef = useRef<Set<string>>(new Set())
+
+  /**
+   * 只补当前层的「平级」卡片，作为叶子节点（内容可复用、不带子孙）。
+   * 历史卡的子树属于当时的上下文，换个上下文打开时不能继承。
+   */
+  useEffect(() => {
+    if (!card?.id) return
+    const parentId = card.parentCardId ?? null
+    const records = sessionCardsRef.current.filter(
+      (record) =>
+        (record.parent_card_id ?? null) === parentId &&
+        record.id !== card.id &&
+        !deletedIdsRef.current.has(record.id),
+    )
+    if (records.length === 0) return
+    setCards((prev) => {
+      const known = new Set(Object.values(prev).map((node) => node.id).filter(Boolean))
+      const missing = records.filter((record) => !known.has(record.id))
+      if (missing.length === 0) return prev
+      const next: Record<string, OpenCardState> = { ...prev }
+      for (const record of missing) {
+        next[record.id] = {
+          localId: record.id,
+          id: record.id,
+          anchor: record.anchor,
+          level: record.level ?? '',
+          question: record.question,
+          answer: record.answer,
+          streaming: false,
+          saved: false,
+          promotedSessionId: record.promoted_session_id ?? null,
+          parentCardId: parentId,
+          // 挂到内存里的父节点键上（可能是还没落库的 localId）
+          parentLocalId: card.parentLocalId,
+          parentText: null,
+          rect: { left: 0, top: 0, width: 0, height: 0 },
+          sourceText: '',
+        }
+      }
+      return next
+    })
+  }, [card])
+
+  /** 当前卡的平级卡片（同一父节点下的其它卡） */
   const siblings = useMemo(
     () =>
       card
@@ -1188,6 +1200,8 @@ export default function App() {
         setFocusId(cursor)
       }
       if (node.id) {
+        deletedIdsRef.current.add(node.id)
+        sessionCardsRef.current = sessionCardsRef.current.filter((item) => !doomed.has(item.id))
         void deleteCard(node.id).catch(() => undefined)
       } else if (node.streaming) {
         // 还没落库（id 未知）：等 runCard 拿到 id 后再删，别让它留成孤儿
