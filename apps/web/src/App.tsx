@@ -21,6 +21,7 @@ import {
   fetchSettings,
   listGlossary,
   listProfiles,
+  deleteCard,
   deleteSession,
   listSessions,
   matchEntry,
@@ -180,6 +181,8 @@ export default function App() {
   const [focusId, setFocusId] = useState<string | null>(null)
   // 每棵子树上次看到的最深处：切分支时能回到原位
   const rememberedFocusRef = useRef<Record<string, string>>({})
+  /** 流式生成中被删掉的卡：等拿到真实 id 后补一次服务端删除，避免留下孤儿行 */
+  const pendingDeleteRef = useRef<Set<string>>(new Set())
   // 会话里已经存在的卡片（用于「同一处划词直接复用」）
   const sessionCardsRef = useRef<CardRecord[]>([])
 
@@ -985,6 +988,11 @@ export default function App() {
             .filter((item) => item.anchor.message_id === anchor.message_id && item.anchor.quote === anchor.quote)
             .pop()
           if (matched) {
+            if (pendingDeleteRef.current.has(targetLocalId)) {
+              pendingDeleteRef.current.delete(targetLocalId)
+              void deleteCard(matched.id).catch(() => undefined)
+              return
+            }
             relink(targetLocalId, matched.id)
             updateCard(targetLocalId, (current) => ({
               ...current,
@@ -1119,6 +1127,46 @@ export default function App() {
     },
     [activeIndex, activeProfile, addCard, card, chain, focusOn, runCard],
   )
+  /** 删除一张卡及其所有子卡；焦点退回最近的存活祖先 */
+  const deleteNode = useCallback(
+    (localId: string) => {
+      const node = cards[localId]
+      if (!node) return
+      const doomed = new Set<string>()
+      const stack = [localId]
+      while (stack.length > 0) {
+        const id = stack.pop() as string
+        if (doomed.has(id)) continue
+        doomed.add(id)
+        for (const item of Object.values(cards)) {
+          if (item.parentLocalId === id) stack.push(item.localId)
+        }
+      }
+      for (const [root, deepest] of Object.entries(rememberedFocusRef.current)) {
+        if (doomed.has(deepest) || doomed.has(root)) delete rememberedFocusRef.current[root]
+      }
+      setCards((prev) => {
+        const next = { ...prev }
+        for (const id of doomed) delete next[id]
+        return next
+      })
+      if (focusId && doomed.has(focusId)) {
+        let cursor: string | null = node.parentLocalId
+        while (cursor && doomed.has(cursor)) {
+          cursor = cards[cursor]?.parentLocalId ?? null
+        }
+        setFocusId(cursor)
+      }
+      if (node.id) {
+        void deleteCard(node.id).catch(() => undefined)
+      } else if (node.streaming) {
+        // 还没落库（id 未知）：等 runCard 拿到 id 后再删，别让它留成孤儿
+        pendingDeleteRef.current.add(localId)
+      }
+    },
+    [cards, focusId],
+  )
+
   const openCard = useCallback(async () => {
     if (!pending) return
     const { anchor, rect, sourceText, fromCardId } = pending
@@ -1582,6 +1630,7 @@ export default function App() {
         onClose={() => void closeCard()}
         onJump={(index) => void jumpToLayer(index)}
         onToggleDock={() => setPinned((value) => !value)}
+        onDeleteNode={deleteNode}
         onBranch={branchFrom}
         onBackToMain={() => void backToMain()}
         onSelectInCard={handleMouseUp}

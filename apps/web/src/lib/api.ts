@@ -256,6 +256,44 @@ export async function deleteCard(id: string): Promise<number> {
   return data.removed
 }
 
+export interface StorageCounts {
+  sessions: number
+  messages: number
+  cards: number
+  entries: number
+  encounters: number
+  turn_usage: number
+  topics: number
+  courses: number
+  db_bytes: number
+}
+
+export interface MaintenanceReport {
+  empty_sessions: number
+  orphan_encounters: number
+  dangling_cards: number
+  orphan_links: number
+  old_turn_usage: number
+  reattached_cards: number
+  vacuumed: boolean
+}
+
+/** 存储概览：各表行数 + 数据库占用 */
+export async function storageStats(): Promise<StorageCounts> {
+  const data = await readJson<{ ok: boolean; counts: StorageCounts }>(await api('/api/storage'))
+  return data.counts
+}
+
+/** 清理孤儿数据并压缩数据库（VACUUM） */
+export async function maintainStorage(): Promise<{
+  report: MaintenanceReport
+  counts: StorageCounts
+}> {
+  return readJson<{ ok: boolean; report: MaintenanceReport; counts: StorageCounts }>(
+    await api('/api/storage', { method: 'POST' }),
+  )
+}
+
 export async function deleteEntry(id: string): Promise<void> {
   await readJson<{ ok: boolean }>(await api(`/api/glossary/${encodeURIComponent(id)}`, { method: 'DELETE' }))
 }

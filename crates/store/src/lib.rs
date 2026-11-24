@@ -72,6 +72,31 @@ CREATE TRIGGER IF NOT EXISTS glossary_au AFTER UPDATE ON glossary BEGIN
 END;
 "#;
 
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct StorageCounts {
+    pub sessions: i64,
+    pub messages: i64,
+    pub cards: i64,
+    pub entries: i64,
+    pub encounters: i64,
+    pub turn_usage: i64,
+    pub topics: i64,
+    pub courses: i64,
+    /// 数据库文件实际字节数（page_count * page_size）
+    pub db_bytes: i64,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct MaintenanceReport {
+    pub empty_sessions: usize,
+    pub orphan_encounters: usize,
+    pub dangling_cards: usize,
+    pub orphan_links: usize,
+    pub old_turn_usage: usize,
+    pub reattached_cards: usize,
+    pub vacuumed: bool,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TopicDeleteResult {
     pub sessions_deleted: usize,
@@ -518,6 +543,15 @@ impl Store {
             "DELETE FROM session_seeds WHERE session_id = ?1",
             params![id],
         )?;
+        // 账本条目本身保留（那是知识），但这张卡在账本里的「遭遇记录」属于会话，跟着删
+        tx.execute(
+            "DELETE FROM encounters WHERE session_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM turn_usage WHERE session_id = ?1",
+            params![id],
+        )?;
         tx.execute(
             "DELETE FROM session_links WHERE parent_session_id = ?1 OR child_session_id = ?1",
             params![id],
@@ -895,6 +929,96 @@ impl Store {
         }
         tx.commit()?;
         Ok(doomed.len())
+    }
+
+    /// 存储概览：各表行数 + 数据库实际占用
+    pub fn storage_counts(&self) -> Result<StorageCounts> {
+        let conn = self.conn();
+        let count = |table: &str| -> i64 {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .unwrap_or(0)
+        };
+        let page_count: i64 = conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap_or(0);
+        let page_size: i64 = conn
+            .query_row("PRAGMA page_size", [], |row| row.get(0))
+            .unwrap_or(0);
+        let free_pages: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+            .unwrap_or(0);
+        let _ = free_pages;
+        Ok(StorageCounts {
+            sessions: count("sessions"),
+            messages: count("messages"),
+            cards: count("cards"),
+            entries: count("entries"),
+            encounters: count("encounters"),
+            turn_usage: count("turn_usage"),
+            topics: count("topics"),
+            courses: count("courses"),
+            db_bytes: page_count * page_size,
+        })
+    }
+
+    /// 清理孤儿数据。`vacuum` = 顺带压缩文件（启动时只清理，不压缩）。
+    ///
+    /// 规则（都可重复执行）：
+    /// - 空会话（一条消息都没有）超过 7 天 → 删
+    /// - 遭遇记录指向已删会话 → 删；指向已删卡片 → 置空（保留知识）
+    /// - 会话链接指向已删会话 → 删
+    /// - token 用量：会话已删或超过 90 天 → 删
+    pub fn maintain(&self, vacuum: bool) -> Result<MaintenanceReport> {
+        let mut conn = self.conn();
+        let mut report = MaintenanceReport::default();
+
+        report.empty_sessions = conn.execute(
+            "DELETE FROM sessions
+              WHERE id NOT IN (SELECT DISTINCT session_id FROM messages)
+                AND julianday(created_at) < julianday('now', '-7 days')",
+            [],
+        )?;
+        report.orphan_encounters = conn.execute(
+            "DELETE FROM encounters
+              WHERE session_id IS NOT NULL
+                AND session_id NOT IN (SELECT id FROM sessions)",
+            [],
+        )?;
+        report.dangling_cards = conn.execute(
+            "UPDATE encounters SET card_id = NULL
+              WHERE card_id IS NOT NULL
+                AND card_id NOT IN (SELECT id FROM cards)",
+            [],
+        )?;
+        report.orphan_links = conn.execute(
+            "DELETE FROM session_links
+              WHERE parent_session_id NOT IN (SELECT id FROM sessions)
+                 OR child_session_id NOT IN (SELECT id FROM sessions)",
+            [],
+        )?;
+        report.old_turn_usage = conn.execute(
+            "DELETE FROM turn_usage
+              WHERE session_id NOT IN (SELECT id FROM sessions)
+                 OR julianday(created_at) < julianday('now', '-90 days')",
+            [],
+        )?;
+        // 升级链断掉的卡片：父卡没了，子卡跟着变成根（不然永远藏在树里）
+        report.reattached_cards = conn.execute(
+            "UPDATE cards SET parent_card_id = NULL
+              WHERE parent_card_id IS NOT NULL
+                AND parent_card_id NOT IN (SELECT id FROM cards)",
+            [],
+        )?;
+
+        if vacuum {
+            // VACUUM 不能开事务；先把 WAL 并回主库，再重写文件
+            let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+            conn.execute_batch("VACUUM;")?;
+            report.vacuumed = true;
+        }
+        drop(conn);
+        let _ = self.fail_orphan_running();
+        Ok(report)
     }
 
     pub fn cards(&self, session_id: &str) -> Result<Vec<Card>> {

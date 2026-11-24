@@ -49,6 +49,8 @@ export interface CardProps {
   /** 钉到右侧（dock）/ 恢复浮层 */
   docked: boolean
   onToggleDock: () => void
+  /** 删除这一层（连同它的所有子卡） */
+  onDeleteNode: (localId: string) => void
   onBackToMain: () => void
   /** 在卡片正文里划词，准备嵌套展开 */
   onSelectInCard: () => void
@@ -92,6 +94,7 @@ export function Card({
   onBranch,
   docked,
   onToggleDock,
+  onDeleteNode,
   onBackToMain,
   onSelectInCard,
   onDepthChange,
@@ -404,6 +407,34 @@ export function Card({
     }
     return map
   }, [treeCards])
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  /** 这一层下面还有多少张卡（删除时会一起走） */
+  const descendants = useMemo(() => {
+    const walk = (id: string): number =>
+      (childrenOf.get(id) ?? []).reduce((sum, node) => sum + 1 + walk(node.localId), 0)
+    return card ? walk(card.localId) : 0
+  }, [card, childrenOf])
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDown = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null
+      if (target?.closest('.card-menu') || target?.closest('.card-more')) return
+      setMenuOpen(false)
+      setConfirmDelete(false)
+    }
+    document.addEventListener('pointerdown', onDown, true)
+    return () => document.removeEventListener('pointerdown', onDown, true)
+  }, [menuOpen])
+
+  // 切层时收起菜单，避免删到上一层的卡
+  useEffect(() => {
+    setMenuOpen(false)
+    setConfirmDelete(false)
+  }, [cardKey])
+
   const hasFork = useMemo(
     () => [...childrenOf.values()].some((list) => list.length > 1),
     [childrenOf],
@@ -546,6 +577,29 @@ export function Card({
         </div>
       )}
 
+      {menuOpen && (
+        <div className="card-menu">
+          <button
+            className={`card-menu-item${confirmDelete ? ' danger' : ''}`}
+            onClick={() => {
+              if (!confirmDelete) {
+                setConfirmDelete(true)
+                return
+              }
+              setConfirmDelete(false)
+              setMenuOpen(false)
+              onDeleteNode(card.localId)
+            }}
+          >
+            {confirmDelete
+              ? t('再点一次确认删除')
+              : descendants > 0
+                ? t('删除这一层和下面 {n} 层', { n: descendants })
+                : t('删除这一层')}
+          </button>
+        </div>
+      )}
+
       <header
         className="card-head"
         onPointerDown={startDrag}
@@ -566,6 +620,16 @@ export function Card({
           title={docked ? t('取消固定') : t('固定到右侧')}
         >
           {docked ? '⇤' : '⇥'}
+        </button>
+        <button
+          className={`icon card-more${menuOpen ? ' active' : ''}`}
+          onClick={() => {
+            setConfirmDelete(false)
+            setMenuOpen((open) => !open)
+          }}
+          title={t('更多')}
+        >
+          ⋯
         </button>
         <button className="icon" onClick={requestClose} title={t('关闭整叠（Esc）')}>
           ×

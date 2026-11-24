@@ -67,6 +67,7 @@ pub const CAPS: &[&str] = &[
     "nodes",
     "resolve",
     "files",
+    "storage",
 ];
 
 #[derive(rust_embed::RustEmbed)]
@@ -171,6 +172,27 @@ pub async fn run_with_ready(
             tracing::warn!("{count} 条未完成的回答被标记为 error");
         }
     }
+    // 每次启动做一次轻量清理（不压缩文件）：空会话、孤儿遭遇、过期 token 用量
+    match store.maintain(false) {
+        Ok(report) => {
+            let total = report.empty_sessions
+                + report.orphan_encounters
+                + report.orphan_links
+                + report.old_turn_usage
+                + report.reattached_cards;
+            if total > 0 {
+                tracing::info!(
+                    "启动清理：空会话 {} / 孤儿遭遇 {} / 悬空卡片 {} / 断链 {} / 过期用量 {}",
+                    report.empty_sessions,
+                    report.orphan_encounters,
+                    report.dangling_cards,
+                    report.orphan_links,
+                    report.old_turn_usage
+                );
+            }
+        }
+        Err(err) => tracing::warn!("启动清理失败：{err}"),
+    }
 
     let settings_store = SettingsStore::new(&data_dir);
     let settings = settings_store.load();
@@ -211,6 +233,7 @@ pub async fn run_with_ready(
             "/api/profiles/{id}",
             axum::routing::put(update_profile).delete(delete_profile),
         )
+        .route("/api/storage", get(storage_stats).post(maintain_storage))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/resolve", get(resolve_session_cwd))
         .route(
@@ -2377,6 +2400,23 @@ async fn delete_glossary(
 struct MergeBody {
     target: String,
     sources: Vec<String>,
+}
+
+async fn storage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.store.storage_counts() {
+        Ok(counts) => Json(json!({ "ok": true, "counts": counts })).into_response(),
+        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+async fn maintain_storage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.store.maintain(true) {
+        Ok(report) => match state.store.storage_counts() {
+            Ok(counts) => Json(json!({ "ok": true, "report": report, "counts": counts })).into_response(),
+            Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        },
+        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
 }
 
 async fn delete_card(
