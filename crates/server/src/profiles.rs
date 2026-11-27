@@ -18,7 +18,10 @@ pub struct Profiles {
 
 impl Profiles {
     pub fn new(dir: &Path, settings: SettingsStore) -> Self {
-        let profiles = Self { dir: dir.to_path_buf(), settings };
+        let profiles = Self {
+            dir: dir.to_path_buf(),
+            settings,
+        };
         profiles.seed();
         profiles.migrate_legacy_tech();
         profiles
@@ -131,7 +134,10 @@ impl Profiles {
             anyhow::bail!("模板不存在：{id}");
         }
         let settings = self.settings.load();
-        self.settings.save(&Settings { active_profile: Some(id.to_string()), ..settings })?;
+        self.settings.save(&Settings {
+            active_profile: Some(id.to_string()),
+            ..settings
+        })?;
         Ok(())
     }
 

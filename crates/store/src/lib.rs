@@ -7,9 +7,9 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use studydeck_core::{
-    Anchor, Card, CardId, Course, Encounter, CourseItem, CourseItemId, CourseItemStatus, Depth, GlossaryEntry,
-    Mastery, Message, MessageStatus, Role, Session, SessionId, SessionSeed, Topic, TopicEdge,
-    TopicEdgeId, TopicEdgeKind, TopicNode, TopicNodeId, TopicNodeStatus,
+    Anchor, Card, CardId, CardTurn, Depth, Encounter, GlossaryEntry, Mastery, Message,
+    MessageStatus, Role, Session, SessionId, SessionSeed, Topic, TopicEdge, TopicEdgeId,
+    TopicEdgeKind, TopicNode, TopicNodeId, TopicNodeStatus, TurnRole, TurnStatus,
 };
 
 const BASE_SCHEMA: &str = r#"
@@ -81,7 +81,6 @@ pub struct StorageCounts {
     pub encounters: i64,
     pub turn_usage: i64,
     pub topics: i64,
-    pub courses: i64,
     /// 数据库文件实际字节数（page_count * page_size）
     pub db_bytes: i64,
 }
@@ -101,17 +100,8 @@ pub struct MaintenanceReport {
 pub struct TopicDeleteResult {
     pub sessions_deleted: usize,
     pub sessions_kept: usize,
-    pub course_items_removed: usize,
     pub edges_removed: usize,
     pub nodes_removed: usize,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CourseSummary {
-    pub course: Course,
-    pub topic_count: usize,
-    pub done_count: usize,
-    pub next_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -172,6 +162,7 @@ const ENTRY_SELECT: &str = "SELECT e.id, e.term, e.summary, e.mastery, e.created
     (SELECT c.char_end FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_char_end,
     (SELECT c.quote FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_quote,
     (SELECT c.session_id FROM encounters c WHERE c.entry_id = e.id ORDER BY c.created_at DESC LIMIT 1) AS last_session_id,
+    (SELECT c.card_id FROM encounters c WHERE c.entry_id = e.id AND c.card_id IS NOT NULL ORDER BY c.created_at DESC LIMIT 1) AS last_card_id,
     e.next_review_at, e.review_count, e.interval_days
     FROM entries e";
 
@@ -283,34 +274,6 @@ fn migrate(conn: &Connection) -> Result<()> {
             )?;
             Ok(())
         }),
-        (7, |c| {
-            c.execute_batch(
-                "CREATE TABLE IF NOT EXISTS courses (
-                    id         TEXT PRIMARY KEY,
-                    title      TEXT NOT NULL,
-                    goal       TEXT NOT NULL DEFAULT '',
-                    start_date TEXT,
-                    end_date   TEXT,
-                    created_at TEXT NOT NULL,
-                    metadata   TEXT NOT NULL DEFAULT '{}'
-                );
-                CREATE TABLE IF NOT EXISTS course_items (
-                    id         TEXT PRIMARY KEY,
-                    course_id  TEXT NOT NULL,
-                    topic_id   TEXT NOT NULL,
-                    position   INTEGER NOT NULL,
-                    planned_at TEXT,
-                    status     TEXT NOT NULL DEFAULT 'planned',
-                    note       TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    metadata   TEXT NOT NULL DEFAULT '{}',
-                    UNIQUE(course_id, topic_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_course_items_course ON course_items(course_id, position);
-                CREATE INDEX IF NOT EXISTS idx_course_items_topic ON course_items(topic_id);",
-            )?;
-            Ok(())
-        }),
         (9, |c| {
             c.execute_batch(
                 "CREATE TABLE IF NOT EXISTS turn_usage (
@@ -327,19 +290,6 @@ fn migrate(conn: &Connection) -> Result<()> {
             Ok(())
         }),
         (8, |c| {
-            ensure_column(c, "courses", "daily_minutes", "INTEGER NOT NULL DEFAULT 60")?;
-            ensure_column(
-                c,
-                "courses",
-                "study_days",
-                "TEXT NOT NULL DEFAULT '1,2,3,4,5'",
-            )?;
-            ensure_column(
-                c,
-                "course_items",
-                "estimated_minutes",
-                "INTEGER NOT NULL DEFAULT 60",
-            )?;
             c.execute_batch(
                 "CREATE TABLE IF NOT EXISTS topic_outline_nodes (
                     id         TEXT PRIMARY KEY,
@@ -435,6 +385,48 @@ fn migrate(conn: &Connection) -> Result<()> {
             )?;
             Ok(())
         }),
+        (17, |c| {
+            ensure_column(c, "sessions", "profile_id", "TEXT")?;
+            Ok(())
+        }),
+        (16, |c| {
+            // 移除课程模块：清掉旧版遗留的表与 sessions.course_id
+            c.execute_batch(
+                "DROP TABLE IF EXISTS course_items;
+                 DROP TABLE IF EXISTS courses;
+                 DROP INDEX IF EXISTS idx_sessions_course;",
+            )?;
+            let has_course_id = {
+                let mut stmt = c.prepare("PRAGMA table_info(sessions)")?;
+                let found = stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .filter_map(|name| name.ok())
+                    .any(|name| name == "course_id");
+                found
+            };
+            if has_course_id {
+                c.execute("ALTER TABLE sessions DROP COLUMN course_id", [])?;
+            }
+            Ok(())
+        }),
+        (14, |c| {
+            // 卡片线程：追问/回答独立成轮，账本恢复时按轮重放
+            c.execute_batch(
+                "CREATE TABLE IF NOT EXISTS card_turns (
+                    id         TEXT PRIMARY KEY,
+                    card_id    TEXT NOT NULL,
+                    seq        INTEGER NOT NULL,
+                    role       TEXT NOT NULL,
+                    text       TEXT NOT NULL DEFAULT '',
+                    level      TEXT,
+                    profile_id TEXT,
+                    status     TEXT NOT NULL DEFAULT 'done',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_card_turns_card ON card_turns(card_id, seq);",
+            )?;
+            Ok(())
+        }),
     ];
 
     // 逐条判断「这条有没有跑过」，而不是只比 MAX(version)：
@@ -511,18 +503,41 @@ impl Store {
         let row = self
             .conn()
             .query_row(
-                "SELECT id, title, created_at FROM sessions WHERE id = ?1",
+                "SELECT id, title, profile_id, created_at FROM sessions WHERE id = ?1",
                 params![id],
                 |row| {
                     Ok(Session {
                         id: row.get::<_, String>(0)?.into(),
                         title: row.get(1)?,
-                        created_at: parse_dt(&row.get::<_, String>(2)?),
+                        profile_id: row.get(2)?,
+                        created_at: parse_dt(&row.get::<_, String>(3)?),
                     })
                 },
             )
             .optional()?;
         Ok(row)
+    }
+
+    pub fn set_session_profile(&self, id: &str, profile_id: Option<&str>) -> Result<()> {
+        let value = profile_id.map(str::trim).filter(|value| !value.is_empty());
+        self.conn().execute(
+            "UPDATE sessions SET profile_id = ?2 WHERE id = ?1",
+            params![id, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn session_profile(&self, id: &str) -> Result<Option<String>> {
+        let value = self
+            .conn()
+            .query_row(
+                "SELECT profile_id FROM sessions WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(value)
     }
 
     pub fn rename_session(&self, id: &str, title: &str) -> Result<()> {
@@ -563,14 +578,8 @@ impl Store {
             params![id],
         )?;
         // 账本条目本身保留（那是知识），但这张卡在账本里的「遭遇记录」属于会话，跟着删
-        tx.execute(
-            "DELETE FROM encounters WHERE session_id = ?1",
-            params![id],
-        )?;
-        tx.execute(
-            "DELETE FROM turn_usage WHERE session_id = ?1",
-            params![id],
-        )?;
+        tx.execute("DELETE FROM encounters WHERE session_id = ?1", params![id])?;
+        tx.execute("DELETE FROM turn_usage WHERE session_id = ?1", params![id])?;
         tx.execute(
             "DELETE FROM session_links WHERE parent_session_id = ?1 OR child_session_id = ?1",
             params![id],
@@ -729,7 +738,7 @@ impl Store {
         let row = self
             .conn()
             .query_row(
-                "SELECT s.id, s.title, s.created_at
+                "SELECT s.id, s.title, s.profile_id, s.created_at
                  FROM ask_sessions a JOIN sessions s ON s.id = a.session_id
                  WHERE a.cwd = ?1",
                 params![cwd],
@@ -737,7 +746,8 @@ impl Store {
                     Ok(Session {
                         id: row.get::<_, String>(0)?.into(),
                         title: row.get(1)?,
-                        created_at: parse_dt(&row.get::<_, String>(2)?),
+                        profile_id: row.get(2)?,
+                        created_at: parse_dt(&row.get::<_, String>(3)?),
                     })
                 },
             )
@@ -929,6 +939,96 @@ impl Store {
             .optional()?)
     }
 
+    // ---------- 卡片线程（追问轮次） ----------
+
+    pub fn card_turns(&self, card_id: &str) -> Result<Vec<CardTurn>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, card_id, seq, role, text, level, profile_id, status, created_at
+             FROM card_turns WHERE card_id = ?1 ORDER BY seq ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![card_id], map_turn)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn add_card_turn(&self, turn: &CardTurn) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO card_turns (id, card_id, seq, role, text, level, profile_id, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                turn.id,
+                turn.card_id.as_str(),
+                turn.seq as i64,
+                turn.role.as_str(),
+                turn.text,
+                turn.level,
+                turn.profile_id,
+                turn.status.as_str(),
+                turn.created_at.to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn next_turn_seq(&self, card_id: &str) -> Result<u32> {
+        let next: i64 = self.conn().query_row(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM card_turns WHERE card_id = ?1",
+            params![card_id],
+            |row| row.get(0),
+        )?;
+        Ok(next.max(0) as u32)
+    }
+
+    pub fn update_card_turn(&self, id: &str, text: &str, status: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE card_turns SET text = ?2, status = ?3 WHERE id = ?1",
+            params![id, text, status],
+        )?;
+        Ok(())
+    }
+
+    /// 老卡片没有 card_turns：按旧的 answer 分隔符懒解析回填，保证账本恢复能拿到线程。
+    pub fn ensure_card_turns(&self, card: &Card) -> Result<Vec<CardTurn>> {
+        let existing = self.card_turns(card.id.as_str())?;
+        if !existing.is_empty() || card.answer.trim().is_empty() {
+            return Ok(existing);
+        }
+        const SEP: &str = "\n\n---\n\n**追问：** ";
+        let now = card.created_at;
+        let mut turns: Vec<CardTurn> = Vec::new();
+        let mut seq = 0u32;
+        let mut push = |role: TurnRole, text: String| {
+            turns.push(CardTurn {
+                id: uuid::Uuid::new_v4().simple().to_string(),
+                card_id: card.id.clone(),
+                seq,
+                role,
+                text,
+                level: card.level.clone(),
+                profile_id: card.profile_id.clone(),
+                status: TurnStatus::Done,
+                created_at: now,
+            });
+            seq += 1;
+        };
+
+        let mut parts = card.answer.split(SEP);
+        let first = parts.next().unwrap_or_default().trim_end().to_string();
+        push(TurnRole::Assistant, first);
+        for part in parts {
+            let (question, answer) = match part.split_once("\n\n") {
+                Some((q, a)) => (q.trim().to_string(), a.trim_end().to_string()),
+                None => (part.trim().to_string(), String::new()),
+            };
+            push(TurnRole::User, question);
+            push(TurnRole::Assistant, answer);
+        }
+        for turn in &turns {
+            self.add_card_turn(turn)?;
+        }
+        Ok(turns)
+    }
+
     /// 删除一张卡片连同它的所有后代；账本里的遭遇记录保留，但不再指向已删卡片。
     pub fn delete_card_tree(&self, id: &str) -> Result<usize> {
         let mut conn = self.conn();
@@ -954,7 +1054,10 @@ impl Store {
         }
         for card_id in &doomed {
             // 账本条目保留（知识），只把「指向这张卡」的引用清掉，别留悬空 id
-            tx.execute("UPDATE encounters SET card_id = NULL WHERE card_id = ?1", params![card_id])?;
+            tx.execute(
+                "UPDATE encounters SET card_id = NULL WHERE card_id = ?1",
+                params![card_id],
+            )?;
             tx.execute(
                 "UPDATE encounters SET parent_card_id = NULL WHERE parent_card_id = ?1",
                 params![card_id],
@@ -968,6 +1071,10 @@ impl Store {
                 "UPDATE session_seeds SET card_id = '' WHERE card_id = ?1",
                 params![card_id],
             )?;
+            tx.execute(
+                "DELETE FROM card_turns WHERE card_id = ?1",
+                params![card_id],
+            )?;
             tx.execute("DELETE FROM cards WHERE id = ?1", params![card_id])?;
         }
         tx.commit()?;
@@ -978,8 +1085,10 @@ impl Store {
     pub fn storage_counts(&self) -> Result<StorageCounts> {
         let conn = self.conn();
         let count = |table: &str| -> i64 {
-            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
-                .unwrap_or(0)
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(0)
         };
         let page_count: i64 = conn
             .query_row("PRAGMA page_count", [], |row| row.get(0))
@@ -999,7 +1108,6 @@ impl Store {
             encounters: count("encounters"),
             turn_usage: count("turn_usage"),
             topics: count("topics"),
-            courses: count("courses"),
             db_bytes: page_count * page_size + wal_bytes,
         })
     }
@@ -1144,9 +1252,11 @@ impl Store {
         let tx = conn.transaction()?;
 
         let entry_id: String = match tx
-            .query_row("SELECT id FROM entries WHERE term_key = ?1", params![key], |row| {
-                row.get::<_, String>(0)
-            })
+            .query_row(
+                "SELECT id FROM entries WHERE term_key = ?1",
+                params![key],
+                |row| row.get::<_, String>(0),
+            )
             .optional()?
         {
             Some(id) => {
@@ -1239,7 +1349,11 @@ impl Store {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let mut summary: String = tx
-            .query_row("SELECT summary FROM entries WHERE id = ?1", params![target], |row| row.get(0))
+            .query_row(
+                "SELECT summary FROM entries WHERE id = ?1",
+                params![target],
+                |row| row.get(0),
+            )
             .optional()?
             .unwrap_or_default();
 
@@ -1248,9 +1362,11 @@ impl Store {
                 continue;
             }
             if let Some(extra) = tx
-                .query_row("SELECT summary FROM entries WHERE id = ?1", params![source], |row| {
-                    row.get::<_, String>(0)
-                })
+                .query_row(
+                    "SELECT summary FROM entries WHERE id = ?1",
+                    params![source],
+                    |row| row.get::<_, String>(0),
+                )
                 .optional()?
             {
                 if !extra.trim().is_empty() && !summary.contains(extra.trim()) {
@@ -1258,7 +1374,10 @@ impl Store {
                     summary.push_str(extra.trim());
                 }
             }
-            tx.execute("UPDATE encounters SET entry_id = ?2 WHERE entry_id = ?1", params![source, target])?;
+            tx.execute(
+                "UPDATE encounters SET entry_id = ?2 WHERE entry_id = ?1",
+                params![source, target],
+            )?;
             tx.execute("DELETE FROM entries WHERE id = ?1", params![source])?;
         }
 
@@ -1278,7 +1397,11 @@ impl Store {
         }
         let exact = self
             .conn()
-            .query_row(&format!("{ENTRY_SELECT} WHERE e.term_key = ?1 LIMIT 1"), params![key], map_entry)
+            .query_row(
+                &format!("{ENTRY_SELECT} WHERE e.term_key = ?1 LIMIT 1"),
+                params![key],
+                map_entry,
+            )
             .optional()?;
         if exact.is_some() {
             return Ok(exact);
@@ -1304,26 +1427,16 @@ impl Store {
     pub fn search_entries(&self, query: Option<&str>, limit: usize) -> Result<Vec<GlossaryEntry>> {
         let conn = self.conn();
         let q = query.map(str::trim).filter(|value| !value.is_empty());
-        let mut out = Vec::new();
-        match q {
-            Some(q) => {
-                let mut stmt = conn.prepare(&format!(
-                    "{ENTRY_SELECT} WHERE e.term LIKE ?1 OR e.summary LIKE ?1 ORDER BY e.updated_at DESC LIMIT ?2"
-                ))?;
-                let rows = stmt.query_map(params![format!("%{}%", q), limit as i64], map_entry)?;
-                for row in rows {
-                    out.push(row?);
-                }
-            }
-            None => {
-                let mut stmt = conn.prepare(&format!("{ENTRY_SELECT} ORDER BY e.updated_at DESC LIMIT ?1"))?;
-                let rows = stmt.query_map(params![limit as i64], map_entry)?;
-                for row in rows {
-                    out.push(row?);
-                }
-            }
-        }
-        Ok(out)
+        let mut stmt = conn.prepare(&format!(
+            "{ENTRY_SELECT}
+             WHERE (?1 IS NULL OR e.term LIKE ?1 OR e.summary LIKE ?1)
+             ORDER BY e.updated_at DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(
+            params![q.map(|value| format!("%{}%", value)), limit as i64],
+            map_entry,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// 今天该复习的条目：到点且还没标成已掌握。
@@ -1363,11 +1476,21 @@ impl Store {
                     next_review_at = ?4,
                     updated_at = ?5
               WHERE id = ?1",
-            params![id, next_interval, count + 1, review_at(next_interval), Utc::now().to_rfc3339()],
+            params![
+                id,
+                next_interval,
+                count + 1,
+                review_at(next_interval),
+                Utc::now().to_rfc3339()
+            ],
         )?;
         // 注意：conn 还持着锁，这里必须复用同一个 guard，不能再 self.conn()
         Ok(conn
-            .query_row(&format!("{ENTRY_SELECT} WHERE e.id = ?1"), params![id], map_entry)
+            .query_row(
+                &format!("{ENTRY_SELECT} WHERE e.id = ?1"),
+                params![id],
+                map_entry,
+            )
             .optional()?)
     }
 
@@ -1389,7 +1512,9 @@ impl Store {
             if guard > 24 {
                 break;
             }
-            let Some(card) = self.card_by_id(&id)? else { break };
+            let Some(card) = self.card_by_id(&id)? else {
+                break;
+            };
             card_id = card.parent_card_id.as_ref().map(|value| value.to_string());
             chain.push(card);
         }
@@ -1425,7 +1550,7 @@ impl Store {
     pub fn entry_encounters(&self, entry_id: &str) -> Result<Vec<Encounter>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, entry_id, gist, profile_id, level, session_id, parent_card_id, created_at
+            "SELECT id, entry_id, gist, profile_id, level, session_id, parent_card_id, card_id, created_at
              FROM encounters WHERE entry_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![entry_id], |row| {
@@ -1437,7 +1562,8 @@ impl Store {
                 level: row.get(4)?,
                 session_id: row.get::<_, Option<String>>(5)?.map(SessionId::from),
                 parent_card_id: row.get(6)?,
-                created_at: parse_dt(&row.get::<_, String>(7)?),
+                card_id: row.get(7)?,
+                created_at: parse_dt(&row.get::<_, String>(8)?),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1709,328 +1835,6 @@ impl Store {
         Ok(())
     }
 
-    // ---------- 课程 / 课表 ----------
-
-    pub fn all_courses(&self) -> Result<Vec<CourseSummary>> {
-        let courses: Vec<Course> = {
-            let conn = self.conn();
-            let mut stmt = conn.prepare(
-                "SELECT id, title, goal, start_date, end_date, created_at, metadata,
-                        daily_minutes, study_days
-                 FROM courses ORDER BY created_at DESC",
-            )?;
-            let rows = stmt.query_map([], map_course)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        let mut out = Vec::with_capacity(courses.len());
-        for course in courses {
-            let topic_count: i64 = self.conn().query_row(
-                "SELECT COUNT(*) FROM course_items WHERE course_id = ?1",
-                params![course.id.as_str()],
-                |row| row.get(0),
-            )?;
-            let done_count: i64 = self.conn().query_row(
-                "SELECT COUNT(*) FROM course_items WHERE course_id = ?1 AND status = 'done'",
-                params![course.id.as_str()],
-                |row| row.get(0),
-            )?;
-            let next_date: Option<String> = self
-                .conn()
-                .query_row(
-                    "SELECT MIN(planned_at) FROM course_items
-                     WHERE course_id = ?1 AND planned_at IS NOT NULL AND planned_at != ''
-                       AND status != 'done'",
-                    params![course.id.as_str()],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .flatten();
-            out.push(CourseSummary {
-                course,
-                topic_count: topic_count as usize,
-                done_count: done_count as usize,
-                next_date,
-            });
-        }
-        Ok(out)
-    }
-
-    pub fn course(&self, id: &str) -> Result<Option<Course>> {
-        load_course(&self.conn(), id)
-    }
-
-    pub fn create_course(&self, course: &Course) -> Result<()> {
-        let metadata = serde_json::to_string(&course.metadata).unwrap_or_else(|_| "{}".into());
-        self.conn().execute(
-            "INSERT INTO courses (id, title, goal, start_date, end_date, created_at, metadata,
-                                  daily_minutes, study_days)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                course.id.as_str(),
-                course.title,
-                course.goal,
-                course.start_date,
-                course.end_date,
-                course.created_at.to_rfc3339(),
-                metadata,
-                course.daily_minutes,
-                course.study_days
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_course(
-        &self,
-        id: &str,
-        title: Option<&str>,
-        goal: Option<&str>,
-        start_date: Option<&str>,
-        end_date: Option<&str>,
-        daily_minutes: Option<i64>,
-        study_days: Option<&str>,
-    ) -> Result<Option<Course>> {
-        let conn = self.conn();
-        if let Some(value) = title {
-            let value = clean_title(value);
-            if !value.is_empty() {
-                conn.execute(
-                    "UPDATE courses SET title = ?2 WHERE id = ?1",
-                    params![id, value],
-                )?;
-            }
-        }
-        if let Some(value) = goal {
-            conn.execute(
-                "UPDATE courses SET goal = ?2 WHERE id = ?1",
-                params![id, value],
-            )?;
-        }
-        if let Some(value) = start_date {
-            let value = if value.trim().is_empty() {
-                None
-            } else {
-                Some(value.trim())
-            };
-            conn.execute(
-                "UPDATE courses SET start_date = ?2 WHERE id = ?1",
-                params![id, value],
-            )?;
-        }
-        if let Some(value) = end_date {
-            let value = if value.trim().is_empty() {
-                None
-            } else {
-                Some(value.trim())
-            };
-            conn.execute(
-                "UPDATE courses SET end_date = ?2 WHERE id = ?1",
-                params![id, value],
-            )?;
-        }
-        if let Some(value) = daily_minutes {
-            conn.execute(
-                "UPDATE courses SET daily_minutes = ?2 WHERE id = ?1",
-                params![id, value.clamp(10, 1440)],
-            )?;
-        }
-        if let Some(value) = study_days {
-            conn.execute(
-                "UPDATE courses SET study_days = ?2 WHERE id = ?1",
-                params![id, value],
-            )?;
-        }
-        drop(conn);
-        self.course(id)
-    }
-
-    pub fn delete_course(&self, id: &str) -> Result<()> {
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM course_items WHERE course_id = ?1", params![id])?;
-        tx.execute("DELETE FROM courses WHERE id = ?1", params![id])?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn course_items(&self, course_id: &str) -> Result<Vec<CourseItem>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, course_id, topic_id, position, planned_at, status, note,
-                    created_at, metadata, estimated_minutes
-             FROM course_items WHERE course_id = ?1 ORDER BY position ASC, rowid ASC",
-        )?;
-        let rows = stmt.query_map(params![course_id], map_course_item)?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
-    pub fn add_course_item(
-        &self,
-        course_id: &str,
-        topic_id: &str,
-        planned_at: Option<&str>,
-        position: Option<i64>,
-        estimated_minutes: Option<i64>,
-    ) -> Result<CourseItem> {
-        if self.course(course_id)?.is_none() {
-            bail!("course not found: {course_id}");
-        }
-        if self.topic(topic_id)?.is_none() {
-            bail!("topic not found: {topic_id}");
-        }
-        if let Some(existing) = self
-            .conn()
-            .query_row(
-                "SELECT id, course_id, topic_id, position, planned_at, status, note,
-                        created_at, metadata, estimated_minutes
-                 FROM course_items WHERE course_id = ?1 AND topic_id = ?2",
-                params![course_id, topic_id],
-                map_course_item,
-            )
-            .optional()?
-        {
-            return Ok(existing);
-        }
-        let position = match position {
-            Some(value) => value,
-            None => self.conn().query_row(
-                "SELECT COALESCE(MAX(position), -1) + 1 FROM course_items WHERE course_id = ?1",
-                params![course_id],
-                |row| row.get(0),
-            )?,
-        };
-        let item = CourseItem {
-            id: CourseItemId::new(),
-            course_id: course_id.into(),
-            topic_id: topic_id.into(),
-            position,
-            planned_at: planned_at
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
-            status: CourseItemStatus::Planned,
-            note: String::new(),
-            estimated_minutes: estimated_minutes.unwrap_or(60).clamp(1, 1440),
-            created_at: Utc::now(),
-            metadata: serde_json::json!({}),
-        };
-        let metadata = serde_json::to_string(&item.metadata).unwrap_or_else(|_| "{}".into());
-        self.conn().execute(
-            "INSERT INTO course_items
-                (id, course_id, topic_id, position, planned_at, status, note, created_at, metadata,
-                 estimated_minutes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                item.id.as_str(),
-                item.course_id.as_str(),
-                item.topic_id.as_str(),
-                item.position,
-                item.planned_at,
-                item.status.as_str(),
-                item.note,
-                item.created_at.to_rfc3339(),
-                metadata,
-                item.estimated_minutes
-            ],
-        )?;
-        Ok(item)
-    }
-
-    pub fn update_course_item(
-        &self,
-        course_id: &str,
-        item_id: &str,
-        planned_at: Option<&str>,
-        status: Option<CourseItemStatus>,
-        note: Option<&str>,
-        position: Option<i64>,
-        estimated_minutes: Option<i64>,
-    ) -> Result<Option<CourseItem>> {
-        let conn = self.conn();
-        if let Some(value) = planned_at {
-            let value = if value.trim().is_empty() {
-                None
-            } else {
-                Some(value.trim())
-            };
-            conn.execute(
-                "UPDATE course_items SET planned_at = ?3 WHERE course_id = ?1 AND id = ?2",
-                params![course_id, item_id, value],
-            )?;
-        }
-        if let Some(value) = status {
-            conn.execute(
-                "UPDATE course_items SET status = ?3 WHERE course_id = ?1 AND id = ?2",
-                params![course_id, item_id, value.as_str()],
-            )?;
-        }
-        if let Some(value) = note {
-            conn.execute(
-                "UPDATE course_items SET note = ?3 WHERE course_id = ?1 AND id = ?2",
-                params![course_id, item_id, value],
-            )?;
-        }
-        if let Some(value) = position {
-            conn.execute(
-                "UPDATE course_items SET position = ?3 WHERE course_id = ?1 AND id = ?2",
-                params![course_id, item_id, value],
-            )?;
-        }
-        if let Some(value) = estimated_minutes {
-            conn.execute(
-                "UPDATE course_items SET estimated_minutes = ?3
-                 WHERE course_id = ?1 AND id = ?2",
-                params![course_id, item_id, value.clamp(1, 1440)],
-            )?;
-        }
-        drop(conn);
-        self.course_item(course_id, item_id)
-    }
-
-    pub fn course_item(&self, course_id: &str, item_id: &str) -> Result<Option<CourseItem>> {
-        let conn = self.conn();
-        Ok(conn
-            .query_row(
-                "SELECT id, course_id, topic_id, position, planned_at, status, note,
-                        created_at, metadata, estimated_minutes
-                 FROM course_items WHERE course_id = ?1 AND id = ?2",
-                params![course_id, item_id],
-                map_course_item,
-            )
-            .optional()?)
-    }
-
-    pub fn delete_course_item(&self, course_id: &str, item_id: &str) -> Result<()> {
-        self.conn().execute(
-            "DELETE FROM course_items WHERE course_id = ?1 AND id = ?2",
-            params![course_id, item_id],
-        )?;
-        Ok(())
-    }
-
-    pub fn reorder_course_items(&self, course_id: &str, item_ids: &[String]) -> Result<()> {
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        for (index, item_id) in item_ids.iter().enumerate() {
-            tx.execute(
-                "UPDATE course_items SET position = ?3
-                 WHERE course_id = ?1 AND id = ?2",
-                params![course_id, item_id, index as i64],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn course_item_count_for_topic(&self, topic_id: &str) -> Result<usize> {
-        let count: i64 = self.conn().query_row(
-            "SELECT COUNT(*) FROM course_items WHERE topic_id = ?1",
-            params![topic_id],
-            |row| row.get(0),
-        )?;
-        Ok(count as usize)
-    }
-
     /// 删除专题。默认保留会话（转为普通会话）；`delete_sessions=true` 时连同会话删除。
     pub fn delete_topic(&self, topic_id: &str, delete_sessions: bool) -> Result<TopicDeleteResult> {
         let mut conn = self.conn();
@@ -2052,10 +1856,6 @@ impl Store {
             let rows = stmt.query_map(params![topic_id], |row| row.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let course_items_removed = tx.execute(
-            "DELETE FROM course_items WHERE topic_id = ?1",
-            params![topic_id],
-        )?;
         let edges_removed = tx.execute(
             "DELETE FROM topic_edges WHERE from_topic_id = ?1 OR to_topic_id = ?1",
             params![topic_id],
@@ -2093,7 +1893,6 @@ impl Store {
             } else {
                 session_ids.len()
             },
-            course_items_removed,
             edges_removed,
             nodes_removed,
         })
@@ -2367,9 +2166,16 @@ impl Store {
         let new_session = SessionId::new();
         let now = Utc::now().to_rfc3339();
         tx.execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at, topic_id)
-             VALUES (?1, ?2, ?3, ?3, ?4)",
-            params![new_session.as_str(), topic.title, now, topic.id.as_str()],
+            "INSERT INTO sessions (id, title, created_at, updated_at, topic_id, profile_id)
+             VALUES (?1, ?2, ?3, ?3, ?4,
+                     (SELECT profile_id FROM sessions WHERE id = ?5))",
+            params![
+                new_session.as_str(),
+                topic.title,
+                now,
+                topic.id.as_str(),
+                session_id
+            ],
         )?;
 
         let seed_metadata = topic_metadata.clone();
@@ -2432,49 +2238,6 @@ impl Store {
             seed,
         })
     }
-}
-
-fn map_course(row: &Row<'_>) -> rusqlite::Result<Course> {
-    let metadata: String = row.get(6)?;
-    Ok(Course {
-        id: row.get::<_, String>(0)?.into(),
-        title: row.get(1)?,
-        goal: row.get(2)?,
-        start_date: row.get(3)?,
-        end_date: row.get(4)?,
-        created_at: parse_dt(&row.get::<_, String>(5)?),
-        daily_minutes: row.get(7).unwrap_or(60),
-        study_days: row.get(8).unwrap_or_else(|_| "1,2,3,4,5".into()),
-        metadata: serde_json::from_str(&metadata).unwrap_or_else(|_| serde_json::json!({})),
-    })
-}
-
-fn load_course(conn: &Connection, id: &str) -> Result<Option<Course>> {
-    Ok(conn
-        .query_row(
-            "SELECT id, title, goal, start_date, end_date, created_at, metadata,
-                    daily_minutes, study_days
-             FROM courses WHERE id = ?1",
-            params![id],
-            map_course,
-        )
-        .optional()?)
-}
-
-fn map_course_item(row: &Row<'_>) -> rusqlite::Result<CourseItem> {
-    let metadata: String = row.get(8)?;
-    Ok(CourseItem {
-        id: row.get::<_, String>(0)?.into(),
-        course_id: row.get::<_, String>(1)?.into(),
-        topic_id: row.get::<_, String>(2)?.into(),
-        position: row.get(3)?,
-        planned_at: row.get(4)?,
-        status: CourseItemStatus::parse(&row.get::<_, String>(5)?).unwrap_or_default(),
-        note: row.get(6)?,
-        created_at: parse_dt(&row.get::<_, String>(7)?),
-        estimated_minutes: row.get(9).unwrap_or(60),
-        metadata: serde_json::from_str(&metadata).unwrap_or_else(|_| serde_json::json!({})),
-    })
 }
 
 fn map_topic_node(row: &Row<'_>) -> rusqlite::Result<TopicNode> {
@@ -2549,7 +2312,11 @@ fn map_card(row: &Row<'_>) -> rusqlite::Result<Card> {
             .ok()
             .flatten()
             .map(CardId::from),
-        stack_depth: row.get::<_, Option<i64>>("stack_depth").ok().flatten().unwrap_or(0) as u32,
+        stack_depth: row
+            .get::<_, Option<i64>>("stack_depth")
+            .ok()
+            .flatten()
+            .unwrap_or(0) as u32,
     })
 }
 
@@ -2657,13 +2424,42 @@ fn summarize(text: &str) -> String {
         .collect()
 }
 
+fn map_turn(row: &Row<'_>) -> rusqlite::Result<CardTurn> {
+    Ok(CardTurn {
+        id: row.get(0)?,
+        card_id: row.get::<_, String>(1)?.into(),
+        seq: row.get::<_, i64>(2)? as u32,
+        role: TurnRole::parse(&row.get::<_, String>(3)?).unwrap_or(TurnRole::Assistant),
+        text: row.get(4)?,
+        level: row.get(5)?,
+        profile_id: row.get(6)?,
+        status: TurnStatus::parse(&row.get::<_, String>(7)?).unwrap_or(TurnStatus::Done),
+        created_at: parse_dt(&row.get::<_, String>(8)?),
+    })
+}
+
 fn map_entry(row: &Row<'_>) -> rusqlite::Result<GlossaryEntry> {
-    let message_id: Option<String> = row.get::<_, Option<String>>("last_message_id").ok().flatten();
+    let message_id: Option<String> = row
+        .get::<_, Option<String>>("last_message_id")
+        .ok()
+        .flatten();
     let anchor = message_id.map(|id| Anchor {
         message_id: id.into(),
-        char_start: row.get::<_, Option<i64>>("last_char_start").ok().flatten().unwrap_or(0) as usize,
-        char_end: row.get::<_, Option<i64>>("last_char_end").ok().flatten().unwrap_or(0) as usize,
-        quote: row.get::<_, Option<String>>("last_quote").ok().flatten().unwrap_or_default(),
+        char_start: row
+            .get::<_, Option<i64>>("last_char_start")
+            .ok()
+            .flatten()
+            .unwrap_or(0) as usize,
+        char_end: row
+            .get::<_, Option<i64>>("last_char_end")
+            .ok()
+            .flatten()
+            .unwrap_or(0) as usize,
+        quote: row
+            .get::<_, Option<String>>("last_quote")
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
     });
     let level: Option<String> = row.get::<_, Option<String>>("last_level").ok().flatten();
     Ok(GlossaryEntry {
@@ -2697,8 +2493,17 @@ fn map_entry(row: &Row<'_>) -> rusqlite::Result<GlossaryEntry> {
             .ok()
             .flatten()
             .map(|value| parse_dt(&value)),
-        review_count: row.get::<_, Option<i64>>("review_count").ok().flatten().unwrap_or(0) as u32,
-        interval_days: row.get::<_, Option<i64>>("interval_days").ok().flatten().unwrap_or(0) as u32,
+        last_card_id: row.get::<_, Option<String>>("last_card_id").ok().flatten(),
+        review_count: row
+            .get::<_, Option<i64>>("review_count")
+            .ok()
+            .flatten()
+            .unwrap_or(0) as u32,
+        interval_days: row
+            .get::<_, Option<i64>>("interval_days")
+            .ok()
+            .flatten()
+            .unwrap_or(0) as u32,
     })
 }
 
@@ -2715,7 +2520,7 @@ fn parse_dt(value: &str) -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use studydeck_core::{Anchor, Card, CardId, Course, Encounter, CourseItemStatus, Depth, Message, Topic};
+    use studydeck_core::{Anchor, Card, CardId, Depth, Encounter, Message, Topic};
 
     #[test]
     fn maintain_cleans_orphans_but_keeps_live_usage() {
@@ -2761,19 +2566,34 @@ mod tests {
         assert!(report.dangling_cards >= 1, "orphan card should be removed");
         let usage: i64 = store
             .conn()
-            .query_row("SELECT COUNT(*) FROM turn_usage WHERE turn_id = 'u-old'", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM turn_usage WHERE turn_id = 'u-old'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(usage, 1, "live session usage must survive");
         let cards: i64 = store
             .conn()
-            .query_row("SELECT COUNT(*) FROM cards WHERE id = 'orphan-card'", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM cards WHERE id = 'orphan-card'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(cards, 0);
         let link: Option<String> = store
             .conn()
-            .query_row("SELECT card_id FROM encounters WHERE id = 'enc1'", [], |row| row.get(0))
+            .query_row(
+                "SELECT card_id FROM encounters WHERE id = 'enc1'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
-        assert_eq!(link, None, "encounter is knowledge: keep the row, drop the card link");
+        assert_eq!(
+            link, None,
+            "encounter is knowledge: keep the row, drop the card link"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -2823,7 +2643,6 @@ mod tests {
             .topic_for_session(&promotion.session_id)
             .unwrap()
             .is_some());
-
         let again = store
             .promote_card(
                 session.id.as_str(),
@@ -2888,12 +2707,6 @@ mod tests {
                 None,
             )
             .expect("edge");
-        let course = Course::new("课程", "");
-        store.create_course(&course).expect("course");
-        store
-            .add_course_item(course.id.as_str(), topic.id.as_str(), None, None, None)
-            .expect("course item");
-
         let kept = store
             .delete_topic(topic.id.as_str(), false)
             .expect("delete keep");
@@ -2904,7 +2717,6 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(store.topic(topic.id.as_str()).unwrap().is_none());
-        assert!(store.course_items(course.id.as_str()).unwrap().is_empty());
         assert!(store.edges_for_topic(topic.id.as_str()).unwrap().is_empty());
 
         let topic2 = Topic::new("混叠", "", Depth::CanTune);
@@ -2966,68 +2778,6 @@ mod tests {
     }
 
     #[test]
-    fn course_items_reorder_and_progress() {
-        let path = std::env::temp_dir().join(format!(
-            "studydeck-course-{}-{}.db",
-            std::process::id(),
-            Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ));
-        let store = Store::open(&path).expect("open store");
-        let course = Course::new("数字信号处理", "掌握采样链路");
-        store.create_course(&course).expect("course");
-
-        let a = Topic::new("采样定理", "", Depth::CanTune);
-        let b = Topic::new("奈奎斯特频率", "", Depth::CanTune);
-        store.create_topic(&a).expect("topic a");
-        store.create_topic(&b).expect("topic b");
-
-        let first = store
-            .add_course_item(
-                course.id.as_str(),
-                a.id.as_str(),
-                Some("2026-12-10"),
-                None,
-                None,
-            )
-            .expect("add a");
-        let second = store
-            .add_course_item(course.id.as_str(), b.id.as_str(), None, None, None)
-            .expect("add b");
-        assert_eq!(first.position, 0);
-        assert_eq!(second.position, 1);
-
-        store
-            .reorder_course_items(
-                course.id.as_str(),
-                &[second.id.to_string(), first.id.to_string()],
-            )
-            .expect("reorder");
-        let items = store.course_items(course.id.as_str()).expect("items");
-        assert_eq!(items[0].topic_id, b.id);
-        assert_eq!(items[1].topic_id, a.id);
-
-        store
-            .update_course_item(
-                course.id.as_str(),
-                first.id.as_str(),
-                Some(""),
-                Some(CourseItemStatus::Done),
-                None,
-                None,
-                None,
-            )
-            .expect("update");
-        let summaries = store.all_courses().expect("summaries");
-        assert_eq!(summaries[0].done_count, 1);
-        assert_eq!(summaries[0].next_date.as_deref(), None);
-
-        store.delete_course(course.id.as_str()).expect("delete");
-        assert!(store.course(course.id.as_str()).unwrap().is_none());
-
-        drop(store);
-        let _ = std::fs::remove_file(path);
-    }
-
     #[test]
     fn usage_totals_are_aggregated_per_session() {
         let path = std::env::temp_dir().join(format!(
@@ -3048,6 +2798,112 @@ mod tests {
         assert_eq!(usage.completion_tokens, 50);
         assert_eq!(usage.total_tokens, 250);
         assert_eq!(usage.turns, 2);
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn session_profile_can_be_selected() {
+        let path = std::env::temp_dir().join(format!(
+            "studydeck-session-profile-{}-{}.db",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let store = Store::open(&path).expect("open store");
+        let session = store.create_session().expect("session");
+        assert_eq!(store.session_profile(session.id.as_str()).unwrap(), None);
+        store
+            .set_session_profile(session.id.as_str(), Some("language-en"))
+            .expect("set profile");
+        assert_eq!(
+            store
+                .session_profile(session.id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("language-en")
+        );
+        assert_eq!(
+            store
+                .get_session(session.id.as_str())
+                .unwrap()
+                .unwrap()
+                .profile_id
+                .as_deref(),
+            Some("language-en")
+        );
+        store
+            .set_session_profile(session.id.as_str(), None)
+            .expect("clear profile");
+        assert_eq!(store.session_profile(session.id.as_str()).unwrap(), None);
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn card_turns_backfill_and_ledger_pointer() {
+        let path = std::env::temp_dir().join(format!(
+            "studydeck-turns-{}-{}.db",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let store = Store::open(&path).expect("open store");
+        let session = store.create_session().expect("session");
+        let anchor = Anchor::new(studydeck_core::MessageId("m1".into()), 0, 2, "采样");
+        let card = Card {
+            id: CardId::new(),
+            session_id: session.id.clone(),
+            anchor: anchor.clone(),
+            depth: Depth::CanTune,
+            question: "请解释这段内容。".into(),
+            answer: "首答\n\n---\n\n**追问：** 为什么？\n\n因为采样定理。".into(),
+            promoted_session_id: None,
+            profile_id: None,
+            level: None,
+            parent_card_id: None,
+            stack_depth: 0,
+            created_at: Utc::now(),
+        };
+        store.add_card(&card).expect("card");
+
+        // 老卡懒回填：首答 + 一轮追问，重复调用不重复插
+        let turns = store.ensure_card_turns(&card).expect("turns");
+        assert_eq!(turns.len(), 3);
+        assert!(matches!(turns[0].role, TurnRole::Assistant));
+        assert!(matches!(turns[1].role, TurnRole::User));
+        assert_eq!(turns[1].text, "为什么？");
+        assert!(matches!(turns[2].role, TurnRole::Assistant));
+        assert_eq!(store.ensure_card_turns(&card).expect("again").len(), 3);
+
+        // 账本指针：最近一次遭遇的 card_id
+        store
+            .record_encounter(
+                "采样定理",
+                "首答",
+                None,
+                None,
+                Some(&anchor),
+                Some(&session.id),
+                None,
+                Some(card.id.as_str()),
+            )
+            .expect("encounter");
+        let entry = store
+            .match_entry("采样定理")
+            .expect("match")
+            .expect("entry");
+        assert_eq!(entry.last_card_id.as_deref(), Some(card.id.as_str()));
+        let detail = store
+            .entry_encounters(entry.id.as_str())
+            .expect("encounters");
+        assert_eq!(detail.len(), 1);
+        assert_eq!(detail[0].card_id.as_deref(), Some(card.id.as_str()));
+
+        // 删卡级联删线程
+        store.delete_card_tree(card.id.as_str()).expect("delete");
+        assert!(store
+            .card_turns(card.id.as_str())
+            .expect("turns")
+            .is_empty());
         drop(store);
         let _ = std::fs::remove_file(path);
     }

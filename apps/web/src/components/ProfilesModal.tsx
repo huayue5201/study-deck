@@ -400,7 +400,7 @@ export function ProfilesModal({ profiles, activeId, onReload, onClose }: Props) 
     try {
       const nextActive = await setActiveProfile(draft.id)
       await reload(nextActive)
-      setNotice(t('已设为默认'))
+      setNotice(t('已设为新会话默认'))
     } catch (err) {
       setError(String(err))
     } finally {
@@ -410,7 +410,7 @@ export function ProfilesModal({ profiles, activeId, onReload, onClose }: Props) 
 
   const deleteBlocked = !draft || effectiveActive === draft.id || list.length <= 1
   const deleteBlockedReason =
-    list.length <= 1 ? t('至少保留一个模板') : t('当前默认模板不能删除')
+    list.length <= 1 ? t('至少保留一个模板') : t('新会话默认模板不能删除')
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -444,7 +444,7 @@ export function ProfilesModal({ profiles, activeId, onReload, onClose }: Props) 
               >
                 <span className="profile-item-top">
                   <span className="profile-name">{profile.label}</span>
-                  {effectiveActive === profile.id && <span className="profile-badge">{t('默认')}</span>}
+                  {effectiveActive === profile.id && <span className="profile-badge">{t('新会话默认')}</span>}
                 </span>
                 <span className="profile-meta">
                   {profile.axis_label} · {profile.levels.length} 档
@@ -650,7 +650,7 @@ export function ProfilesModal({ profiles, activeId, onReload, onClose }: Props) 
               onClick={() => void makeDefault()}
               disabled={busy || !draft || effectiveActive === draft.id}
             >
-              {draft && effectiveActive === draft.id ? t('当前默认') : t('设为默认')}
+              {draft && effectiveActive === draft.id ? t('新会话默认') : t('设为新会话默认')}
             </button>
             <button
               className="danger"

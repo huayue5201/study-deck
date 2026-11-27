@@ -4,8 +4,6 @@ import { Sidebar } from './components/Sidebar'
 import { OriginBanner } from './components/OriginBanner'
 import { PromoteDialog } from './components/PromoteDialog'
 import { TopicPage } from './components/TopicPage'
-import { CoursePage } from './components/CoursePage'
-import { CourseDialog } from './components/CourseDialog'
 import { MessageList } from './components/MessageList'
 import { CardLayer } from './components/CardLayer'
 import { GlossaryPanel } from './components/GlossaryPanel'
@@ -15,6 +13,7 @@ import { ProfilesModal } from './components/ProfilesModal'
 import { type OpenCardState } from './components/Card'
 import {
   createSession,
+  fetchCardThread,
   fetchHealth,
   fetchProviders,
   fetchSession,
@@ -26,15 +25,13 @@ import {
   listSessions,
   matchEntry,
   renameSession,
+  setSessionProfile,
   saveGlossary,
   searchMessages,
   streamChat,
   promoteCard,
   listTopics,
   updateTopic,
-  listCourses,
-  createCourse,
-  listReminders,
   parseTopicOutline,
 } from './lib/api'
 import { useI18n } from './lib/i18n'
@@ -47,6 +44,7 @@ import {
   type Anchor,
   type CardProfile,
   type CardRecord,
+  type CardTurn,
   type Depth,
   type GlossaryEntry,
   type Message,
@@ -58,8 +56,6 @@ import {
   type SessionView,
   type SessionOrigin,
   type Topic,
-  type CourseSummary,
-  type Reminder,
   type SettingsView,
 } from './lib/types'
 
@@ -161,6 +157,22 @@ function resolveLevel(profile: CardProfile, preferred?: string | null): string {
   return profile.levels[0]?.id ?? 'can_tune'
 }
 
+/** 把 card_turns 还原成卡片正文：首答 + 每轮「追问/回答」，和流式时的拼接格式一致。 */
+function threadToAnswer(initial: string, turns: CardTurn[]): string {
+  if (!turns.length) return initial
+  const first = turns.find((turn) => turn.role === 'assistant')
+  let out = first?.text || initial
+  for (let i = 0; i < turns.length; i += 1) {
+    const turn = turns[i]
+    if (turn.role !== 'user') continue
+    const next = turns[i + 1]
+    const answer = next && next.role === 'assistant' ? next.text : ''
+    out += `\n\n---\n\n**追问：** ${turn.text}\n\n${answer}`
+    i += 1
+  }
+  return out
+}
+
 export default function App() {
   const { t, lang } = useI18n()
   const [sessionId, setSessionId] = useState<string | null>(null)
@@ -172,13 +184,7 @@ export default function App() {
   const [promoting, setPromoting] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 900)
   const [topics, setTopics] = useState<Topic[]>([])
-  const [courses, setCourses] = useState<CourseSummary[]>([])
   const [topicPageId, setTopicPageId] = useState<string | null>(null)
-  const [coursePageId, setCoursePageId] = useState<string | null>(null)
-  const [showCourseDialog, setShowCourseDialog] = useState(false)
-  const [creatingCourse, setCreatingCourse] = useState(false)
-  const [dueReminders, setDueReminders] = useState<Reminder[]>([])
-  const [reminderDismissed, setReminderDismissed] = useState(false)
   const [toolActivity, setToolActivity] = useState<{
     name: string
     args: unknown
@@ -202,12 +208,22 @@ export default function App() {
   const abortersRef = useRef<Set<AbortController>>(new Set())
   // openCard 互斥：连着划两段词时只认第一个，避免两张卡抢焦点
   const openingRef = useRef(false)
+  // 从账本恢复：等目标会话渲染完再挂节点，避免被「切会话清空卡片树」的 effect 冲掉
+  const pendingRestoreRef = useRef<{ sessionId: string; card: OpenCardState } | null>(null)
 
   // 换会话时清空卡片树；关闭卡片栈不清（同会话内再打开还能切回分支）
   useEffect(() => {
     setCards({})
     setFocusId(null)
     rememberedFocusRef.current = {}
+    const pendingRestore = pendingRestoreRef.current
+    if (pendingRestore && pendingRestore.sessionId === sessionId) {
+      pendingRestoreRef.current = null
+      const restored = { [pendingRestore.card.localId]: pendingRestore.card }
+      cardsRef.current = restored
+      setCards(restored)
+      setFocusId(pendingRestore.card.localId)
+    }
     // 深层路径记忆只在本次运行内有效：里面存的是 localId，重启后对不上
     if (!sessionId) {
       sessionCardsRef.current = []
@@ -475,6 +491,11 @@ export default function App() {
   const [showProfiles, setShowProfiles] = useState(false)
   const [profiles, setProfiles] = useState<CardProfile[]>([])
   const [activeProfile, setActiveProfile] = useState<CardProfile>(FALLBACK_PROFILE)
+  const [sessionProfileId, setSessionProfileId] = useState<string | null>(null)
+  const sessionProfile = useMemo(
+    () => profiles.find((item) => item.id === sessionProfileId) ?? activeProfile,
+    [profiles, sessionProfileId, activeProfile],
+  )
   const [gateSkipped, setGateSkipped] = useState(false)
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [searchQuery, setSearchQuery] = useState('')
@@ -539,7 +560,8 @@ export default function App() {
               setMessages(view.messages)
               setOrigin(view.origin ?? null)
               setTopic(view.topic ?? null)
-              const list = await listSessions().catch(() => [])
+              setSessionProfileId(view.profile_id ?? null)
+                            const list = await listSessions().catch(() => [])
               if (!cancelled) setSessions(list)
             }
             return
@@ -578,7 +600,8 @@ export default function App() {
             setMessages(chosen.messages)
             setOrigin(chosen.origin ?? null)
             setTopic(chosen.topic ?? null)
-            setSessions(await listSessions().catch(() => []))
+            setSessionProfileId(chosen.profile_id ?? null)
+                  setSessions(await listSessions().catch(() => []))
           }
           return
         }
@@ -614,22 +637,6 @@ export default function App() {
       setTopics(await listTopics())
     } catch {
       // 专题列表拿不到不影响主流程
-    }
-  }, [])
-
-  const refreshCourses = useCallback(async () => {
-    try {
-      setCourses(await listCourses())
-    } catch {
-      // 课程列表拿不到不影响主流程
-    }
-  }, [])
-
-  const refreshReminders = useCallback(async () => {
-    try {
-      setDueReminders(await listReminders())
-    } catch {
-      // 提醒拿不到不影响主流程
     }
   }, [])
 
@@ -679,7 +686,7 @@ export default function App() {
     let cancelled = false
     const refresh = async () => {
       if (document.visibilityState !== 'visible') return
-      if (topicPageId || coursePageId || streamingId) return
+      if (topicPageId || streamingId) return
       const sid = sessionRef.current
       if (!sid) return
       try {
@@ -687,6 +694,7 @@ export default function App() {
         // 请求期间切了会话：别把旧会话的消息盖到新会话上
         if (cancelled || sid !== sessionRef.current) return
         setMessages((current) => (sameMessages(current, view.messages) ? current : view.messages))
+        setSessionProfileId((current) => (current === (view.profile_id ?? null) ? current : view.profile_id ?? null))
         setUsage(view.usage ?? null)
         setOrigin((current) =>
           JSON.stringify(current) === JSON.stringify(view.origin) ? current : view.origin,
@@ -705,15 +713,11 @@ export default function App() {
       window.clearInterval(timer)
       window.removeEventListener('focus', refresh)
     }
-  }, [topicPageId, coursePageId, streamingId, sessionId])
+  }, [topicPageId, streamingId, sessionId])
 
   useEffect(() => {
     void refreshTopics()
-    void refreshCourses()
-    void refreshReminders()
-    const timer = window.setInterval(() => void refreshReminders(), 5 * 60 * 1000)
-    return () => window.clearInterval(timer)
-  }, [refreshTopics, refreshCourses, refreshReminders])
+  }, [refreshTopics])
 
   useEffect(() => {
     const term = searchQuery.trim()
@@ -735,11 +739,11 @@ export default function App() {
     }
   }, [searchQuery])
 
-  const switchSession = useCallback(async (id: string) => {
-    if (!id) return
+  const switchSession = useCallback(async (id: string): Promise<boolean> => {
+    if (!id) return false
     if (id === sessionRef.current) {
       setTopicPageId(null)
-      return
+      return true
     }
     abortStreams()
     try {
@@ -749,11 +753,13 @@ export default function App() {
       setMessages(view.messages)
       setOrigin(view.origin ?? null)
       setTopic(view.topic ?? null)
+      setSessionProfileId(view.profile_id ?? null)
       setTopicPageId(null)
-      setCoursePageId(null)
       if (window.innerWidth <= 900) setSidebarOpen(false)
+      return true
     } catch (err) {
       setError(String(err))
+      return false
     }
   }, [abortStreams])
 
@@ -767,8 +773,8 @@ export default function App() {
       setMessages([])
       setOrigin(null)
       setTopic(null)
+      setSessionProfileId(view.profile_id ?? null)
       setTopicPageId(null)
-      setCoursePageId(null)
       await refreshSessions()
       if (window.innerWidth <= 900) setSidebarOpen(false)
     } catch (err) {
@@ -799,8 +805,8 @@ export default function App() {
       setMessages(view.messages)
       setOrigin(view.origin ?? null)
       setTopic(view.topic ?? null)
+      setSessionProfileId(view.profile_id ?? null)
       setTopicPageId(null)
-      setCoursePageId(null)
       await refreshSessions()
     } catch (err) {
       setError(String(err))
@@ -839,30 +845,23 @@ export default function App() {
 
   const openTopic = useCallback((id: string) => {
     setTopicPageId(id)
-    setCoursePageId(null)
-    if (window.innerWidth <= 900) setSidebarOpen(false)
-  }, [])
-
-  const openCourse = useCallback((id: string) => {
-    setCoursePageId(id)
-    setTopicPageId(null)
     if (window.innerWidth <= 900) setSidebarOpen(false)
   }, [])
 
   const refreshWorkspace = useCallback(() => {
     void refreshSessions()
     void refreshTopics()
-    void refreshCourses()
-    void refreshReminders()
-  }, [refreshSessions, refreshTopics, refreshCourses, refreshReminders])
+  }, [refreshSessions, refreshTopics])
 
   const handleTopicDeleted = useCallback(
-    async () => {
+    async (deletedTopicId: string) => {
       setTopicPageId(null)
+      // 先本地摘掉，避免侧边栏等接口往返时还显示刚删的专题；
+      // 刷新后再过滤一次，防止并发请求把旧列表带回来。
+      setTopics((current) => current.filter((item) => item.id !== deletedTopicId))
       await refreshSessions()
       await refreshTopics()
-      await refreshCourses()
-      void refreshReminders()
+      setTopics((current) => current.filter((item) => item.id !== deletedTopicId))
       const list = await listSessions()
       setSessions(list)
       const current = sessionRef.current
@@ -876,35 +875,12 @@ export default function App() {
         setMessages(view.messages)
         setOrigin(view.origin ?? null)
         setTopic(view.topic ?? null)
-      } catch {
+        setSessionProfileId(view.profile_id ?? null)
+              } catch {
         await newSession()
       }
     },
-    [refreshSessions, refreshTopics, refreshCourses, refreshReminders, newSession],
-  )
-
-  const submitCourse = useCallback(
-    async (input: {
-      title: string
-      goal: string
-      start_date: string
-      end_date: string
-      daily_minutes: number
-      study_days: string
-    }) => {
-      setCreatingCourse(true)
-      try {
-        const course = await createCourse(input)
-        await refreshCourses()
-        setShowCourseDialog(false)
-        openCourse(course.id)
-      } catch (err) {
-        setError(String(err))
-      } finally {
-        setCreatingCourse(false)
-      }
-    },
-    [openCourse, refreshCourses],
+    [refreshSessions, refreshTopics, newSession],
   )
 
   const sendMain = useCallback(async (text: string, options?: { saveOutline?: boolean }) => {
@@ -1014,7 +990,7 @@ export default function App() {
             mode: 'card',
             text,
             anchor,
-            profile_id: activeProfile.id,
+            profile_id: sessionProfile.id,
             level,
             locale: lang,
             card_id: existingCardId ?? undefined,
@@ -1077,7 +1053,7 @@ export default function App() {
         }
       }
     },
-    [activeProfile.id, beginTool, finishTool, clearTool, lang, updateCard, relink],
+    [sessionProfile.id, beginTool, finishTool, clearTool, lang, updateCard, relink],
   )
 
   const submitPromotion = useCallback(
@@ -1106,6 +1082,7 @@ export default function App() {
         setMessages(view.messages)
         setOrigin(view.origin ?? result.seed)
         setTopic(view.topic ?? result.topic)
+        setSessionProfileId(view.profile_id ?? null)
         setPromote(null)
         setTopicPageId(null)
         await refreshSessions()
@@ -1140,6 +1117,17 @@ export default function App() {
   }, [])
 
 
+  const changeSessionProfile = useCallback(async (profileId: string) => {
+    const sid = sessionRef.current
+    if (!sid) return
+    try {
+      await setSessionProfile(sid, profileId)
+      setSessionProfileId(profileId)
+    } catch (err) {
+      setError(String(err))
+    }
+  }, [])
+
   const saveCard = useCallback(async () => {
     // 流式中的答案不完整，别写进账本（服务端会自己持久化卡片正文）
     if (!card || card.streaming || !card.answer.trim() || card.saved) return
@@ -1147,9 +1135,9 @@ export default function App() {
       await saveGlossary({
         term: suggestTerm(card.anchor.quote),
         gist: stripMarkdown(card.answer).slice(0, 160),
-        depth: depthForLevel(activeProfile, card.level),
+        depth: depthForLevel(sessionProfile, card.level),
         anchor: card.anchor,
-        profile_id: activeProfile.id,
+        profile_id: sessionProfile.id,
         level: card.level,
         parent_card_id: card.parentCardId ?? undefined,
         card_id: card.id ?? undefined,
@@ -1159,14 +1147,14 @@ export default function App() {
     } catch (err) {
       setError(String(err))
     }
-  }, [activeProfile, card, glossaryOpen, query, refreshGlossary])
+  }, [sessionProfile, card, glossaryOpen, query, refreshGlossary])
 
   /** 在同一处内容上再问一个：在当前卡的父节点下新开一条兄弟分支 */
   const branchFrom = useCallback(
     (text: string) => {
       if (!card) return
       const parent = chain[activeIndex - 1] ?? null
-      const level = resolveLevel(activeProfile, card.level)
+      const level = resolveLevel(sessionProfile, card.level)
       const node: OpenCardState = {
         localId: newLocalId(),
         id: null,
@@ -1198,7 +1186,7 @@ export default function App() {
         node.parentText,
       )
     },
-    [activeIndex, activeProfile, addCard, card, chain, focusOn, runCard],
+    [activeIndex, sessionProfile, addCard, card, chain, focusOn, runCard],
   )
   /** 删除一张卡及其所有子卡；焦点退回最近的存活祖先 */
   const deleteNode = useCallback(
@@ -1297,12 +1285,19 @@ export default function App() {
       if (existing) {
         if (land((item) => item.id === existing.id)) return
         // 不在内存树里：作为新节点接在后面，内容直接复用
+        let reusedAnswer = existing.answer
+        try {
+          const thread = await fetchCardThread(existing.id)
+          reusedAnswer = threadToAnswer(thread.card.answer, thread.turns)
+        } catch {
+          // 取线程失败就退回 cards.answer，别阻断打开
+        }
         const reused: OpenCardState = {
           localId: newLocalId(),
           id: existing.id,
           anchor,
-          level: existing.level ?? resolveLevel(activeProfile),
-          answer: existing.answer,
+          level: existing.level ?? resolveLevel(sessionProfile),
+          answer: reusedAnswer,
           streaming: false,
           // 有卡片不代表已记账：账本条目只由用户点「保存到账本」产生
           saved: false,
@@ -1324,13 +1319,13 @@ export default function App() {
     try {
       const hit = await matchEntry(suggestTerm(anchor.quote))
       if (hit) {
-        const level = resolveLevel(activeProfile, hit.depth)
+        const level = resolveLevel(sessionProfile, hit.depth)
         const reused: OpenCardState = {
           localId: newLocalId(),
           id: null,
           anchor,
           level,
-          answer: `**已有记录**（${activeProfile.levels.find((item) => item.id === level)?.label ?? hit.depth} · ${MASTERY_LABEL[hit.mastery]} · 记于 ${hit.created_at.slice(0, 10)}）\n\n${hit.gist}\n\n> 这是账本里的旧结论。要重新讲一遍点「重新生成」。`,
+          answer: `**已有记录**（${sessionProfile.levels.find((item) => item.id === level)?.label ?? hit.depth} · ${MASTERY_LABEL[hit.mastery]} · 记于 ${hit.created_at.slice(0, 10)}）\n\n${hit.gist}\n\n> 这是账本里的旧结论。要重新讲一遍点「重新生成」。`,
           streaming: false,
           saved: true,
           promotedSessionId: null,
@@ -1350,7 +1345,7 @@ export default function App() {
     }
 
     // 4) 新卡：先挂节点（有自己的 localId），再发起流式请求
-    const level = resolveLevel(activeProfile)
+    const level = resolveLevel(sessionProfile)
     const node: OpenCardState = {
       localId: newLocalId(),
       id: null,
@@ -1384,7 +1379,45 @@ export default function App() {
     } finally {
       openingRef.current = false
     }
-  }, [activeProfile, addCard, card, cards, focusOn, pending, runCard, t])
+  }, [sessionProfile, addCard, card, cards, focusOn, pending, runCard, t])
+
+  /** 从账本恢复：切到卡片所属会话，把整条线程按原样重新挂出来 */
+  const resumeCard = useCallback(
+    async (cardId: string) => {
+      try {
+        const thread = await fetchCardThread(cardId)
+        const node: OpenCardState = {
+          localId: newLocalId(),
+          id: thread.card.id,
+          anchor: thread.card.anchor,
+          level: thread.card.level ?? resolveLevel(sessionProfile, thread.card.depth),
+          answer: threadToAnswer(thread.card.answer, thread.turns),
+          streaming: false,
+          saved: true,
+          promotedSessionId: thread.card.promoted_session_id ?? null,
+          parentCardId: null,
+          parentLocalId: null,
+          parentText: null,
+          question: thread.card.question,
+          // 旧卡没有当前选区坐标：Card 内部会居中摆放
+          rect: { left: 0, top: 0, width: 0, height: 0 },
+          sourceText: thread.card.anchor.quote,
+        }
+        const target = thread.card.session_id
+        if (target && target !== sessionRef.current) {
+          pendingRestoreRef.current = { sessionId: target, card: node }
+          const switched = await switchSession(target)
+          if (switched) return
+          pendingRestoreRef.current = null
+        }
+        addCard(node)
+        focusOn(node.localId)
+      } catch (err) {
+        setError(String(err))
+      }
+    },
+    [sessionProfile, addCard, focusOn, switchSession],
+  )
 
   // 关卡片只收起界面：账本只认用户点「保存到账本」，不做自动记账
   const closeCard = useCallback(() => {
@@ -1432,9 +1465,9 @@ export default function App() {
           localStorage.setItem('studydeck.session', view.id)
           setSessionId(view.id)
           setMessages(view.messages)
+          setSessionProfileId(view.profile_id ?? null)
           setTopicPageId(null)
-          setCoursePageId(null)
-        } catch (err) {
+            } catch (err) {
           setError(String(err))
           return
         }
@@ -1464,11 +1497,7 @@ export default function App() {
   const currentTopic = topicPageId
     ? topics.find((item) => item.id === topicPageId)
     : null
-  const currentCourse = coursePageId
-    ? courses.find((item) => item.course.id === coursePageId)?.course
-    : null
   const currentTitle =
-    currentCourse?.title ||
     currentTopic?.title ||
     sessions.find((item) => item.id === sessionId)?.title ||
     topic?.title ||
@@ -1483,16 +1512,12 @@ export default function App() {
       <Sidebar
         sessions={sessions}
         topics={topics}
-        courses={courses}
-        activeId={topicPageId || coursePageId ? null : sessionId}
+        activeId={topicPageId ? null : sessionId}
         activeTopicId={topicPageId}
-        activeCourseId={coursePageId}
         open={sidebarOpen}
         onSelect={(id) => void switchSession(id)}
         onOpenTopic={openTopic}
-        onOpenCourse={openCourse}
         onNew={() => void newSession()}
-        onNewCourse={() => setShowCourseDialog(true)}
         onRename={(id) => {
           const current = sessions.find((item) => item.id === id)
           setRenameValue(current?.title ?? '')
@@ -1514,7 +1539,7 @@ export default function App() {
 
           <div className="topbar-context">
             <span className="topbar-kicker">
-              {coursePageId ? t('课程') : topicPageId ? t('专题') : t('会话')}
+              {topicPageId ? t('专题') : t('会话')}
             </span>
             <span className="current-title" title={currentTitle}>
               {currentTitle}
@@ -1523,7 +1548,23 @@ export default function App() {
           </div>
 
           <div className="topbar-actions">
-            {!topicPageId && !coursePageId && (
+            {!topicPageId && sessionId && profiles.length > 0 && (
+              <label className="profile-picker" title={t('本会话卡片模板')}>
+                <span>{t('本会话模板')}</span>
+                <select
+                  value={sessionProfile.id}
+                  aria-label={t('本会话卡片模板')}
+                  onChange={(event) => void changeSessionProfile(event.target.value)}
+                >
+                  {profiles.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {!topicPageId && (
               <button
                 className={glossaryOpen ? 'ghost active' : 'ghost'}
                 onClick={() => setGlossaryOpen((value) => !value)}
@@ -1582,48 +1623,18 @@ export default function App() {
           </div>
         )}
 
-        {dueReminders.length > 0 && !reminderDismissed && (
-          <div className="reminder-banner">
-            <span>
-              {t('今天有 {n} 个学习任务待完成：', { n: dueReminders.length })}
-              {dueReminders
-                .slice(0, 3)
-                .map((item) => item.topic?.title || item.course_title)
-                .join('、')}
-              {dueReminders.length > 3 ? '…' : ''}
-            </span>
-            <button
-              onClick={() => {
-                openCourse(dueReminders[0].course_id)
-                setReminderDismissed(true)
-              }}
-            >
-              {t('查看')}
-            </button>
-            <button className="icon" onClick={() => setReminderDismissed(true)}>
-              ×
-            </button>
-          </div>
-        )}
-
-        {coursePageId ? (
-          <CoursePage
-            courseId={coursePageId}
-            topics={topics}
-            onBack={() => setCoursePageId(null)}
-            onOpenTopic={openTopic}
-            onChanged={refreshWorkspace}
-          />
-        ) : topicPageId ? (
+        {topicPageId ? (
           <TopicPage
             topicId={topicPageId}
             sessions={sessions}
             topics={topics}
-            onBack={() => setTopicPageId(null)}
+            onBack={() => {
+              setTopicPageId(null)
+                      }}
             onOpenSession={(id) => void switchSession(id)}
             onJump={(sid, mid) => void jumpTo(sid, mid)}
             onChanged={refreshWorkspace}
-            onDeleted={() => void handleTopicDeleted()}
+            onDeleted={() => void handleTopicDeleted(topicPageId)}
           />
         ) : (
           <>
@@ -1673,6 +1684,7 @@ export default function App() {
             onQuery={setQuery}
             onClose={() => setGlossaryOpen(false)}
             onJump={(sessionId, messageId) => void jumpTo(sessionId, messageId)}
+            onResumeCard={(cardId) => void resumeCard(cardId)}
             onChanged={() => void refreshGlossary(query)}
             hits={hits}
             searchQuery={searchQuery}
@@ -1716,7 +1728,7 @@ export default function App() {
         treeCards={treeCards}
         onFocusNode={focusOn}
         docked={docked}
-        profile={activeProfile}
+        profile={sessionProfile}
         onClose={() => void closeCard()}
         onJump={(index) => void jumpToLayer(index)}
         onToggleDock={() => setPinned((value) => !value)}
@@ -1733,7 +1745,7 @@ export default function App() {
           void runCard(
             card.localId,
             card.anchor,
-            resolveLevel(activeProfile, card.level),
+            resolveLevel(sessionProfile, card.level),
             text,
             card.id,
             card.sourceText,
@@ -1748,7 +1760,7 @@ export default function App() {
           void runCard(
             card.localId,
             card.anchor,
-            resolveLevel(activeProfile, card.level),
+            resolveLevel(sessionProfile, card.level),
             t('请重新解释这段内容。'),
             card.id,
             card.sourceText,
@@ -1767,20 +1779,12 @@ export default function App() {
       {promote && (
         <PromoteDialog
           card={promote}
-          initialDepth={depthForLevel(activeProfile, promote.level)}
+          initialDepth={depthForLevel(sessionProfile, promote.level)}
           parentTitle={sessions.find((item) => item.id === sessionId)?.title ?? ''}
           topics={topics}
           busy={promoting}
           onCancel={() => setPromote(null)}
           onSubmit={(input) => void submitPromotion(input)}
-        />
-      )}
-
-      {showCourseDialog && (
-        <CourseDialog
-          busy={creatingCourse}
-          onCancel={() => setShowCourseDialog(false)}
-          onSubmit={(input) => void submitCourse(input)}
         />
       )}
 

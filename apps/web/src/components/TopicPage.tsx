@@ -555,13 +555,9 @@ export function TopicPage({
               </button>
             </header>
             <p className="muted promote-note">
-              {t('将删除 {nodes} 个学习节点、{relations} 条关系{extra}。账本条目会保留。', {
+              {t('将删除 {nodes} 个学习节点、{relations} 条关系。账本条目会保留。', {
                 nodes: detail.nodes.length,
                 relations: detail.relations.length,
-                extra:
-                  detail.course_count > 0
-                    ? t('，并从 {n} 个课程中移除', { n: detail.course_count })
-                    : '',
               })}
             </p>
             <label className="delete-option">

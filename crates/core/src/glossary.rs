@@ -82,6 +82,9 @@ pub struct GlossaryEntry {
     pub review_count: u32,
     #[serde(default)]
     pub interval_days: u32,
+    /// 最近一次遭遇对应的卡片：账本靠它恢复完整线程。
+    #[serde(default)]
+    pub last_card_id: Option<String>,
 }
 
 /// 一次「遇到」：在哪个上下文、用哪套模板哪一档、得到什么结论。
@@ -95,6 +98,9 @@ pub struct Encounter {
     pub session_id: Option<SessionId>,
     /// 若是在某张卡上展开的，记下父卡
     pub parent_card_id: Option<String>,
+    /// 这次遭遇对应的卡片；恢复线程时用它。
+    #[serde(default)]
+    pub card_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -122,6 +128,7 @@ impl GlossaryEntry {
             next_review_at: None,
             review_count: 0,
             interval_days: 0,
+            last_card_id: None,
         }
     }
 }

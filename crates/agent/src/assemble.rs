@@ -2,8 +2,8 @@
 //! 这是整个项目里最值钱的 300 行。
 
 use studydeck_core::{
-    profiles::CardProfile,
-    Anchor, Block, ContextAssembler, Depth, Message, Mode, Role, SessionSeed, Topic, TurnRequest,
+    profiles::CardProfile, Anchor, Block, ContextAssembler, Depth, Message, Mode, Role,
+    SessionSeed, Topic, TurnRequest,
 };
 
 use crate::context;
@@ -223,7 +223,11 @@ impl ContextAssembler for CardAssembler {
                 "\n本次档位：{}{}\n讲解停在这里：{}\n",
                 level.label,
                 parenthetical,
-                if level.stop.trim().is_empty() { "按该档位的常识边界收住" } else { &level.stop }
+                if level.stop.trim().is_empty() {
+                    "按该档位的常识边界收住"
+                } else {
+                    &level.stop
+                }
             ));
         } else {
             system.push_str("\n本张卡片的理解深度约定：");
@@ -312,8 +316,7 @@ pub fn describe(mode: Mode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use studydeck_core::{
-    profiles::CardProfile,BlockRole, CardId, MessageId, SessionId, TopicId};
+    use studydeck_core::{profiles::CardProfile, BlockRole, CardId, MessageId, SessionId, TopicId};
 
     fn seed() -> SessionSeed {
         SessionSeed {
@@ -553,7 +556,10 @@ mod profile_tests {
         request.locale = Some("en".into());
         let blocks = CardAssembler::new(request.profile.clone()).assemble(&request);
         let system = &blocks.first().expect("system block").text;
-        assert!(system.contains("用英文回答"), "英文界面应要求英文回答: {system}");
+        assert!(
+            system.contains("用英文回答"),
+            "英文界面应要求英文回答: {system}"
+        );
     }
 
     #[test]
@@ -573,6 +579,9 @@ mod profile_tests {
         let request = card_request(Some(broken), Some("register"));
         let blocks = CardAssembler::new(request.profile.clone()).assemble(&request);
         let system = &blocks.first().expect("system block").text;
-        assert!(system.contains("前置依赖（一层）"), "空模板应回落到内置 tech: {system}");
+        assert!(
+            system.contains("前置依赖（一层）"),
+            "空模板应回落到内置 tech: {system}"
+        );
     }
 }

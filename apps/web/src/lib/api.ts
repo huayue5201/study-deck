@@ -7,6 +7,7 @@ import type {
   TestResult,
   Anchor,
   CardProfile,
+  CardThread,
   ChatBody,
   Depth,
   EntryDetail,
@@ -19,14 +20,8 @@ import type {
   Topic,
   TopicDetail,
   TopicEdgeKind,
-  Course,
-  CourseDetail,
-  CourseItem,
-  CourseItemStatus,
-  CourseSummary,
   TopicNode,
   TopicNodeStatus,
-  Reminder,
 } from './types'
 
 const TOKEN =
@@ -109,6 +104,16 @@ export async function fetchSession(id: string): Promise<SessionView> {
   return readJson<SessionView>(await api(`/api/sessions/${id}`))
 }
 
+export async function setSessionProfile(id: string, profileId: string): Promise<void> {
+  await readJson<{ ok: boolean }>(
+    await api(`/api/sessions/${id}/profile`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile_id: profileId }),
+    }),
+  )
+}
+
 /** 唯一的 SSE 入口：解析 `data: {...}` 帧并分发，支持取消。 */
 export async function streamChat(
   body: ChatBody,
@@ -155,7 +160,9 @@ export async function streamChat(
 }
 
 export async function listGlossary(query?: string): Promise<GlossaryEntry[]> {
-  const suffix = query && query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ''
+  const params = new URLSearchParams()
+  if (query && query.trim()) params.set('q', query.trim())
+  const suffix = params.size > 0 ? `?${params.toString()}` : ''
   const data = await readJson<{ entries: GlossaryEntry[] }>(await api(`/api/glossary${suffix}`))
   return data.entries
 }
@@ -226,6 +233,10 @@ export async function listSessions(): Promise<SessionSummary[]> {
   return data.sessions
 }
 
+export async function fetchCardThread(id: string): Promise<CardThread> {
+  return readJson<CardThread>(await api(`/api/cards/${encodeURIComponent(id)}`))
+}
+
 export async function matchEntry(term: string): Promise<GlossaryEntry | null> {
   const data = await readJson<{ entry: GlossaryEntry | null }>(
     await api(`/api/glossary/match?term=${encodeURIComponent(term)}`),
@@ -263,7 +274,6 @@ export interface StorageCounts {
   encounters: number
   turn_usage: number
   topics: number
-  courses: number
   db_bytes: number
 }
 
@@ -372,7 +382,6 @@ export async function deleteTopic(
 ): Promise<{
   sessions_deleted: number
   sessions_kept: number
-  course_items_removed: number
   edges_removed: number
   nodes_removed: number
 }> {
@@ -463,148 +472,6 @@ export async function downloadExport(format: 'md' | 'json'): Promise<void> {
   link.remove()
   // 立刻 revoke 会让 WebKit 读不到 blob，稍等一下再释放
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-}
-
-export async function listCourses(): Promise<CourseSummary[]> {
-  const data = await readJson<{ courses: CourseSummary[] }>(await api('/api/courses'))
-  return data.courses
-}
-
-export async function createCourse(input: {
-  title: string
-  goal?: string
-  start_date?: string
-  end_date?: string
-  daily_minutes?: number
-  study_days?: string
-}): Promise<Course> {
-  return readJson<Course>(
-    await api('/api/courses', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    }),
-  )
-}
-
-export async function fetchCourse(id: string): Promise<CourseDetail> {
-  return readJson<CourseDetail>(await api(`/api/courses/${id}`))
-}
-
-export async function updateCourse(
-  id: string,
-  patch: {
-    title?: string
-    goal?: string
-    start_date?: string
-    end_date?: string
-    daily_minutes?: number
-    study_days?: string
-  },
-): Promise<Course> {
-  return readJson<Course>(
-    await api(`/api/courses/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
-    }),
-  )
-}
-
-export async function deleteCourse(id: string): Promise<void> {
-  await readJson<{ ok: boolean }>(await api(`/api/courses/${id}`, { method: 'DELETE' }))
-}
-
-export async function addCourseItem(
-  courseId: string,
-  input: {
-    topic_id: string
-    planned_at?: string | null
-    position?: number
-    estimated_minutes?: number
-  },
-): Promise<CourseItem> {
-  return readJson<CourseItem>(
-    await api(`/api/courses/${courseId}/items`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    }),
-  )
-}
-
-export async function updateCourseItem(
-  courseId: string,
-  itemId: string,
-  patch: {
-    planned_at?: string
-    status?: CourseItemStatus
-    note?: string
-    position?: number
-    estimated_minutes?: number
-  },
-): Promise<CourseItem> {
-  return readJson<CourseItem>(
-    await api(`/api/courses/${courseId}/items/${itemId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
-    }),
-  )
-}
-
-export async function deleteCourseItem(courseId: string, itemId: string): Promise<void> {
-  await readJson<{ ok: boolean }>(
-    await api(`/api/courses/${courseId}/items/${itemId}`, { method: 'DELETE' }),
-  )
-}
-
-export async function reorderCourse(courseId: string, itemIds: string[]): Promise<CourseDetail> {
-  return readJson<CourseDetail>(
-    await api(`/api/courses/${courseId}/reorder`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ item_ids: itemIds }),
-    }),
-  )
-}
-
-export async function autoOrderCourse(courseId: string): Promise<CourseDetail> {
-  return readJson<CourseDetail>(
-    await api(`/api/courses/${courseId}/auto-order`, { method: 'POST' }),
-  )
-}
-
-export async function autoScheduleCourse(
-  courseId: string,
-  input: { daily_minutes?: number; study_days?: string } = {},
-): Promise<CourseDetail> {
-  return readJson<CourseDetail>(
-    await api(`/api/courses/${courseId}/auto-schedule`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    }),
-  )
-}
-
-export async function listReminders(date?: string): Promise<Reminder[]> {
-  const suffix = date ? `?date=${encodeURIComponent(date)}` : ''
-  const data = await readJson<{ due: Reminder[] }>(await api(`/api/reminders${suffix}`))
-  return data.due
-}
-
-export async function downloadCourseCalendar(courseId: string, title: string): Promise<void> {
-  const response = await api(`/api/courses/${courseId}/calendar.ics`)
-  const blob = await response.blob()
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `${title || 'studydeck'}.ics`
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  URL.revokeObjectURL(url)
 }
 
 export async function parseTopicOutline(

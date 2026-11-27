@@ -23,6 +23,8 @@ interface Props {
   onQuery: (value: string) => void
   onClose: () => void
   onJump: (sessionId: string | null, messageId: string | null) => void
+  /** 账本恢复：打开这张卡所属的完整线程并继续追问 */
+  onResumeCard: (cardId: string) => void
   onChanged: () => void
   hits: MessageHit[]
   searchQuery: string
@@ -42,8 +44,6 @@ export function GlossaryPanel(props: Props) {
   const [tab, setTab] = useState<'ledger' | 'review' | 'search'>('ledger')
   const [due, setDue] = useState<GlossaryEntry[]>([])
   const [reviewBusy, setReviewBusy] = useState(false)
-  const [editing, setEditing] = useState<string | null>(null)
-  const [draft, setDraft] = useState('')
   const [confirming, setConfirming] = useState<string | null>(null)
   const [openTimeline, setOpenTimeline] = useState<string | null>(null)
   const [details, setDetails] = useState<Record<string, EntryDetail>>({})
@@ -93,14 +93,6 @@ export function GlossaryPanel(props: Props) {
     }
     return groups
   }, [props.entries])
-
-  const saveGist = async (entry: GlossaryEntry) => {
-    const gist = draft.trim()
-    setEditing(null)
-    if (!gist || gist === entry.gist) return
-    await updateEntry(entry.id, { gist })
-    props.onChanged()
-  }
 
   const cycleMastery = async (entry: GlossaryEntry) => {
     await updateEntry(entry.id, { mastery: MASTERY_NEXT[entry.mastery] })
@@ -215,21 +207,7 @@ export function GlossaryPanel(props: Props) {
                     )}
                   </div>
 
-                  {editing === entry.id ? (
-                    <div className="edit">
-                      <textarea
-                        value={draft}
-                        rows={4}
-                        onChange={(event) => setDraft(event.target.value)}
-                      />
-                      <div className="edit-actions">
-                        <button onClick={() => void saveGist(entry)}>{t('保存')}</button>
-                        <button onClick={() => setEditing(null)}>{t('取消')}</button>
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="gist">{entry.gist}</p>
-                  )}
+                  <p className="gist">{entry.gist}</p>
 
                   {openTimeline === entry.id && (
                     <div className="entry-detail">
@@ -293,6 +271,14 @@ export function GlossaryPanel(props: Props) {
                             </span>
                             <span className="encounter-level">{hit.level ?? ''}</span>
                             <span className="encounter-gist">{hit.gist.slice(0, 80)}</span>
+                            {hit.card_id && (
+                              <button
+                                className="link small"
+                                onClick={() => props.onResumeCard(hit.card_id as string)}
+                              >
+                                {t('继续学习')}
+                              </button>
+                            )}
                           </div>
                         ))}
                         {(details[entry.id]?.encounters.length ?? 0) === 0 && (
@@ -303,6 +289,14 @@ export function GlossaryPanel(props: Props) {
                   )}
 
                   <div className="entry-actions">
+                    {entry.last_card_id && (
+                      <button
+                        className="link"
+                        onClick={() => props.onResumeCard(entry.last_card_id as string)}
+                      >
+                        {t('继续学习')}
+                      </button>
+                    )}
                     {entry.source_anchor && (
                       <button
                         className="link"
@@ -313,15 +307,6 @@ export function GlossaryPanel(props: Props) {
                         {t('回到来源')}
                       </button>
                     )}
-                    <button
-                      className="link"
-                      onClick={() => {
-                        setEditing(entry.id)
-                        setDraft(entry.gist)
-                      }}
-                    >
-                      {t('编辑')}
-                    </button>
                     {group.length > 1 && (
                       <button className="link" onClick={() => void merge(entry)}>
                         {t('合并 {n} 条', { n: group.length })}

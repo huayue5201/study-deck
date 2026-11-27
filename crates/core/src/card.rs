@@ -90,3 +90,74 @@ pub struct Card {
     pub stack_depth: u32,
     pub created_at: DateTime<Utc>,
 }
+
+/// 卡片线程里的一轮发言。追问不再拼进 answer 字符串，而是独立成行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TurnRole {
+    User,
+    Assistant,
+}
+
+impl TurnRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TurnRole::User => "user",
+            TurnRole::Assistant => "assistant",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "user" => Some(TurnRole::User),
+            "assistant" => Some(TurnRole::Assistant),
+            _ => None,
+        }
+    }
+}
+
+/// 一轮的状态：写到一半 / 正常结束 / 出错 / 被取消。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TurnStatus {
+    Streaming,
+    Done,
+    Error,
+    Aborted,
+}
+
+impl TurnStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TurnStatus::Streaming => "streaming",
+            TurnStatus::Done => "done",
+            TurnStatus::Error => "error",
+            TurnStatus::Aborted => "aborted",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "streaming" => Some(TurnStatus::Streaming),
+            "done" => Some(TurnStatus::Done),
+            "error" => Some(TurnStatus::Error),
+            "aborted" => Some(TurnStatus::Aborted),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CardTurn {
+    pub id: String,
+    pub card_id: CardId,
+    pub seq: u32,
+    pub role: TurnRole,
+    pub text: String,
+    #[serde(default)]
+    pub level: Option<String>,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    pub status: TurnStatus,
+    pub created_at: DateTime<Utc>,
+}

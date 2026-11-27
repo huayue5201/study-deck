@@ -107,6 +107,9 @@ impl Message {
 pub struct Session {
     pub id: SessionId,
     pub title: Option<String>,
+    /// 本会话使用的卡片模板；为空时回落到全局默认模板。
+    #[serde(default)]
+    pub profile_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -115,6 +118,7 @@ impl Session {
         Self {
             id: SessionId::new(),
             title: None,
+            profile_id: None,
             created_at: Utc::now(),
         }
     }

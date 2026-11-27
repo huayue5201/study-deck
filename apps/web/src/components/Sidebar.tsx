@@ -1,20 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useI18n } from '../lib/i18n'
-import type { CourseSummary, SessionSummary, Topic } from '../lib/types'
+import type { SessionSummary, Topic } from '../lib/types'
 
 interface Props {
   sessions: SessionSummary[]
   topics: Topic[]
-  courses: CourseSummary[]
   activeId: string | null
   activeTopicId: string | null
-  activeCourseId: string | null
   open: boolean
   onSelect: (id: string) => void
   onOpenTopic: (id: string) => void
-  onOpenCourse: (id: string) => void
   onNew: () => void
-  onNewCourse: () => void
   onRename: (id: string) => void
   onDelete: (id: string) => void
   onClose: () => void
@@ -38,20 +34,16 @@ function relative(
     : new Date(iso).toLocaleDateString(lang === 'en' ? 'en-US' : 'zh-CN')
 }
 
-/** 会话工作区：专题 > 会话，加普通会话。课程层以后加在这里。 */
+/** 会话工作区：专题 > 会话，加普通会话。 */
 export function Sidebar({
   sessions,
   topics,
-  courses,
   activeId,
   activeTopicId,
-  activeCourseId,
   open,
   onSelect,
   onOpenTopic,
-  onOpenCourse,
   onNew,
-  onNewCourse,
   onRename,
   onDelete,
   onClose,
@@ -88,7 +80,7 @@ export function Sidebar({
 
   const filtered = useMemo(() => {
     const term = query.trim().toLowerCase()
-    if (!term) return { topics, sessions, courses }
+    if (!term) return { topics, sessions }
     return {
       topics: topics.filter((topic) => topic.title.toLowerCase().includes(term)),
       sessions: sessions.filter(
@@ -96,9 +88,8 @@ export function Sidebar({
           (session.title || '未命名').toLowerCase().includes(term) ||
           (session.topic_title ?? '').toLowerCase().includes(term),
       ),
-      courses: courses.filter((item) => item.course.title.toLowerCase().includes(term)),
     }
-  }, [sessions, topics, courses, query])
+  }, [sessions, topics, query])
 
   const normal = filtered.sessions.filter((item) => !item.topic_id)
 
@@ -173,9 +164,6 @@ export function Sidebar({
         <button className="new-session" onClick={onNew}>
           ＋ {t('新会话')}
         </button>
-        <button className="new-session" onClick={onNewCourse}>
-          ＋ {t('新课程')}
-        </button>
       </div>
       <input
         className="sidebar-search"
@@ -185,31 +173,13 @@ export function Sidebar({
       />
 
       <div className="session-list">
-        {filtered.courses.length > 0 && (
-          <>
-            <div className="session-group">{t('课程')}</div>
-            {filtered.courses.map(({ course, topic_count, done_count, next_date }) => (
-              <button
-                key={course.id}
-                className={`course-node ${course.id === activeCourseId ? 'active' : ''}`}
-                onClick={() => onOpenCourse(course.id)}
-                title={course.goal || course.title}
-              >
-                <span className="course-node-name">{course.title}</span>
-                <span className="course-node-meta">
-                  {done_count}/{topic_count}
-                  {next_date ? ` · ${next_date}` : ''}
-                </span>
-              </button>
-            ))}
-          </>
-        )}
-
         {filtered.topics.length > 0 && (
           <>
             <div className="session-group">{t('专题')}</div>
             {filtered.topics.map((topic) => {
-              const children = filtered.sessions.filter((item) => item.topic_id === topic.id)
+              const children = filtered.sessions.filter(
+                (item) => item.topic_id === topic.id,
+              )
               return (
                 <div key={topic.id} className="topic-group">
                   <button
@@ -227,7 +197,7 @@ export function Sidebar({
           </>
         )}
 
-        <div className="session-group">{t('最近')}</div>
+        <div className="session-group">{t('普通会话')}</div>
         {normal.length === 0 && filtered.topics.length === 0 && (
           <div className="sidebar-empty">{t('还没有会话')}</div>
         )}

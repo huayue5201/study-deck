@@ -72,6 +72,26 @@ export interface CardRecord {
   stack_depth?: number
 }
 
+export type TurnRole = 'user' | 'assistant'
+export type TurnStatus = 'streaming' | 'done' | 'error' | 'aborted'
+
+export interface CardTurn {
+  id: string
+  card_id: string
+  seq: number
+  role: TurnRole
+  text: string
+  level?: string | null
+  profile_id?: string | null
+  status: TurnStatus
+  created_at: string
+}
+
+export interface CardThread {
+  card: CardRecord
+  turns: CardTurn[]
+}
+
 export interface Topic {
   id: string
   title: string
@@ -106,7 +126,6 @@ export interface TopicDetail {
   suggestions: TopicSuggestion[]
   source: SessionOrigin | null
   nodes: TopicNode[]
-  course_count: number
 }
 
 export type TopicNodeStatus = 'planned' | 'learning' | 'done'
@@ -149,6 +168,7 @@ export interface SessionView {
   cards: CardRecord[]
   topic: Topic | null
   origin: SessionOrigin | null
+  profile_id: string | null
   usage?: SessionUsage
 }
 
@@ -169,6 +189,7 @@ export interface GlossaryEntry {
   next_review_at?: string | null
   review_count?: number
   interval_days?: number
+  last_card_id?: string | null
 }
 
 export interface Encounter {
@@ -179,6 +200,7 @@ export interface Encounter {
   level: string | null
   session_id: string | null
   parent_card_id: string | null
+  card_id?: string | null
   created_at: string
 }
 
@@ -298,66 +320,6 @@ export interface TurnView {
   question: string
   error: string | null
   message_id: string | null
-}
-
-export type CourseItemStatus = 'planned' | 'learning' | 'done'
-
-export interface Course {
-  id: string
-  title: string
-  goal: string
-  start_date: string | null
-  end_date: string | null
-  daily_minutes: number
-  study_days: string
-  created_at: string
-  metadata?: Record<string, unknown>
-}
-
-export interface CourseItem {
-  id: string
-  course_id: string
-  topic_id: string
-  position: number
-  planned_at: string | null
-  status: CourseItemStatus
-  note: string
-  estimated_minutes: number
-  created_at: string
-  metadata?: Record<string, unknown>
-}
-
-export interface CoursePrerequisite {
-  topic_id: string
-  title: string
-  in_course: boolean
-  warning: string
-}
-
-export interface CourseDetailItem {
-  item: CourseItem
-  topic: Topic | null
-  prerequisites: CoursePrerequisite[]
-}
-
-export interface CourseSummary {
-  course: Course
-  topic_count: number
-  done_count: number
-  next_date: string | null
-}
-
-export interface CourseDetail {
-  course: Course
-  items: CourseDetailItem[]
-  progress: { total: number; done: number }
-}
-
-export interface Reminder {
-  course_id: string
-  course_title: string
-  item: CourseItem
-  topic: Topic | null
 }
 
 export interface EntryPathNode {

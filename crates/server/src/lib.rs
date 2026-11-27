@@ -22,16 +22,15 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use chrono::{Datelike, Utc};
+use chrono::Utc;
 use futures_util::{stream, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 use store::Store;
 use studydeck_core::{
-    AgentEvent, Anchor, Card, CardId, CardProfile, Course, CourseItemStatus, Depth,
-    Mastery,
-    Message, MessageStatus, Mode, SessionId, Topic, TopicEdgeKind, TopicNodeStatus, TurnRequest,
-    Usage,
+    AgentEvent, Anchor, Card, CardId, CardProfile, CardTurn, Depth, Mastery, Message,
+    MessageStatus, Mode, SessionId, Topic, TopicEdgeKind, TopicNodeStatus, TurnRequest, TurnRole,
+    TurnStatus, Usage,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::BroadcastStream;
@@ -60,9 +59,6 @@ pub const CAPS: &[&str] = &[
     "promote",
     "topics",
     "relations",
-    "courses",
-    "calendar",
-    "reminders",
     "outline",
     "nodes",
     "resolve",
@@ -228,7 +224,10 @@ pub async fn run_with_ready(
         .route("/api/settings/test", post(test_connection))
         .route("/api/settings/key", axum::routing::delete(clear_key))
         .route("/api/profiles", get(list_profiles).post(create_profile))
-        .route("/api/profiles/active", axum::routing::put(set_active_profile))
+        .route(
+            "/api/profiles/active",
+            axum::routing::put(set_active_profile),
+        )
         .route(
             "/api/profiles/{id}",
             axum::routing::put(update_profile).delete(delete_profile),
@@ -249,6 +248,10 @@ pub async fn run_with_ready(
             "/api/sessions/{id}/topic",
             axum::routing::patch(set_session_topic),
         )
+        .route(
+            "/api/sessions/{id}/profile",
+            axum::routing::patch(set_session_profile),
+        )
         .route("/api/topics", get(list_topics).post(create_topic))
         .route(
             "/api/topics/{id}",
@@ -266,34 +269,13 @@ pub async fn run_with_ready(
             axum::routing::patch(update_topic_node).delete(delete_topic_node),
         )
         .route("/api/topics/{id}/outline/parse", post(parse_topic_outline))
-        .route("/api/courses", get(list_courses).post(create_course))
-        .route(
-            "/api/courses/{id}",
-            get(get_course).patch(update_course).delete(delete_course),
-        )
-        .route("/api/courses/{id}/items", post(add_course_item))
-        .route(
-            "/api/courses/{id}/items/{item_id}",
-            axum::routing::patch(update_course_item).delete(delete_course_item),
-        )
-        .route("/api/courses/{id}/reorder", post(reorder_course))
-        .route("/api/courses/{id}/auto-order", post(auto_order_course))
-        .route(
-            "/api/courses/{id}/auto-schedule",
-            post(auto_schedule_course),
-        )
-        .route("/api/courses/{id}/calendar.ics", get(course_calendar))
-        .route("/api/reminders", get(reminders))
         .route("/api/chat", post(chat))
         .route("/api/ask", post(ask))
         .route("/api/turns", get(list_turns))
         .route("/api/turns/{id}", get(get_turn))
         .route("/api/turns/{id}/events", get(turn_events))
         .route("/api/turns/{id}/cancel", post(cancel_turn))
-        .route(
-            "/api/cards/{id}",
-            axum::routing::delete(delete_card),
-        )
+        .route("/api/cards/{id}", get(card_detail).delete(delete_card))
         .route("/api/glossary", get(list_glossary).post(add_glossary))
         .route("/api/glossary/match", get(match_glossary))
         .route("/api/entries/{id}", get(entry_detail))
@@ -547,7 +529,13 @@ async fn clear_key(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 async fn create_session(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.store.create_session() {
-        Ok(session) => Json(json!({ "id": session.id })).into_response(),
+        Ok(session) => {
+            let profile_id = state.profiles.active_id();
+            let _ = state
+                .store
+                .set_session_profile(session.id.as_str(), Some(&profile_id));
+            Json(json!({ "id": session.id, "profile_id": profile_id })).into_response()
+        }
         Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
@@ -567,6 +555,7 @@ async fn get_session(
     let usage = state.store.session_usage(&id).unwrap_or_default();
     Json(json!({
         "id": session.id,
+        "profile_id": session.profile_id,
         "messages": messages,
         "cards": cards,
         "topic": topic,
@@ -709,7 +698,6 @@ async fn get_topic(State(state): State<Arc<AppState>>, AxumPath(id): AxumPath<St
     let suggestions = topic_suggestions(&state.store, &id).unwrap_or_default();
     let source = state.store.topic_seed(&id).ok().flatten();
     let nodes = state.store.topic_nodes(&id).unwrap_or_default();
-    let course_count = state.store.course_item_count_for_topic(&id).unwrap_or(0);
     Json(json!({
         "topic": topic,
         "sessions": sessions,
@@ -717,7 +705,6 @@ async fn get_topic(State(state): State<Arc<AppState>>, AxumPath(id): AxumPath<St
         "suggestions": suggestions,
         "source": source,
         "nodes": nodes,
-        "course_count": course_count,
     }))
     .into_response()
 }
@@ -774,12 +761,49 @@ async fn create_topic_session(
     AxumPath(id): AxumPath<String>,
 ) -> Response {
     match state.store.create_session_in_topic(&id) {
-        Ok(session) => (
-            StatusCode::CREATED,
-            Json(json!({ "id": session.id, "title": session.title })),
-        )
-            .into_response(),
+        Ok(session) => {
+            let profile_id = state.profiles.active_id();
+            let _ = state
+                .store
+                .set_session_profile(session.id.as_str(), Some(&profile_id));
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "id": session.id,
+                    "title": session.title,
+                    "profile_id": profile_id,
+                })),
+            )
+                .into_response()
+        }
         Err(err) => api_error(StatusCode::BAD_REQUEST, err.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionProfileBody {
+    profile_id: Option<String>,
+}
+
+async fn set_session_profile(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<SessionProfileBody>,
+) -> impl IntoResponse {
+    if state.store.get_session(&id).ok().flatten().is_none() {
+        return api_error(StatusCode::NOT_FOUND, "session not found");
+    }
+    if let Some(profile_id) = body.profile_id.as_deref() {
+        if state.profiles.get(profile_id).is_none() {
+            return api_error(StatusCode::BAD_REQUEST, "profile not found");
+        }
+    }
+    match state
+        .store
+        .set_session_profile(&id, body.profile_id.as_deref())
+    {
+        Ok(()) => Json(json!({ "ok": true, "profile_id": body.profile_id })).into_response(),
+        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
 
@@ -1029,578 +1053,6 @@ fn parse_prerequisites(answer: &str) -> Vec<String> {
     out
 }
 
-// ---------- 课程 / 课表 ----------
-
-async fn list_courses(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.store.all_courses() {
-        Ok(courses) => Json(json!({ "courses": courses })).into_response(),
-        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct CourseCreate {
-    title: String,
-    goal: Option<String>,
-    start_date: Option<String>,
-    end_date: Option<String>,
-    daily_minutes: Option<i64>,
-    study_days: Option<String>,
-}
-
-async fn create_course(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<CourseCreate>,
-) -> Response {
-    let title = body.title.trim();
-    if title.is_empty() {
-        return api_error(StatusCode::BAD_REQUEST, "title 不能为空");
-    }
-    let mut course = Course::new(title, body.goal.unwrap_or_default());
-    course.start_date = body
-        .start_date
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    course.end_date = body
-        .end_date
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    if let Some(value) = body.daily_minutes {
-        course.daily_minutes = value.clamp(10, 1440);
-    }
-    if let Some(value) = body.study_days {
-        if !value.trim().is_empty() {
-            course.study_days = value;
-        }
-    }
-    match state.store.create_course(&course) {
-        Ok(()) => (StatusCode::CREATED, Json(course)).into_response(),
-        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    }
-}
-
-async fn get_course(
-    State(state): State<Arc<AppState>>,
-    AxumPath(id): AxumPath<String>,
-) -> Response {
-    match course_detail_payload(&state.store, &id) {
-        Ok(payload) => Json(payload).into_response(),
-        Err(err) => api_error(StatusCode::NOT_FOUND, err.to_string()),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct CourseUpdate {
-    title: Option<String>,
-    goal: Option<String>,
-    start_date: Option<String>,
-    end_date: Option<String>,
-    daily_minutes: Option<i64>,
-    study_days: Option<String>,
-}
-
-async fn update_course(
-    State(state): State<Arc<AppState>>,
-    AxumPath(id): AxumPath<String>,
-    Json(body): Json<CourseUpdate>,
-) -> Response {
-    match state.store.update_course(
-        &id,
-        body.title.as_deref(),
-        body.goal.as_deref(),
-        body.start_date.as_deref(),
-        body.end_date.as_deref(),
-        body.daily_minutes,
-        body.study_days.as_deref(),
-    ) {
-        Ok(Some(course)) => Json(course).into_response(),
-        Ok(None) => api_error(StatusCode::NOT_FOUND, "course not found"),
-        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    }
-}
-
-async fn delete_course(
-    State(state): State<Arc<AppState>>,
-    AxumPath(id): AxumPath<String>,
-) -> Response {
-    match state.store.delete_course(&id) {
-        Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct CourseItemCreate {
-    topic_id: String,
-    planned_at: Option<String>,
-    position: Option<i64>,
-    estimated_minutes: Option<i64>,
-}
-
-async fn add_course_item(
-    State(state): State<Arc<AppState>>,
-    AxumPath(id): AxumPath<String>,
-    Json(body): Json<CourseItemCreate>,
-) -> Response {
-    match state.store.add_course_item(
-        &id,
-        &body.topic_id,
-        body.planned_at.as_deref(),
-        body.position,
-        body.estimated_minutes,
-    ) {
-        Ok(item) => (StatusCode::CREATED, Json(item)).into_response(),
-        Err(err) => api_error(StatusCode::BAD_REQUEST, err.to_string()),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct CourseItemUpdate {
-    planned_at: Option<String>,
-    status: Option<String>,
-    note: Option<String>,
-    position: Option<i64>,
-    estimated_minutes: Option<i64>,
-}
-
-async fn update_course_item(
-    State(state): State<Arc<AppState>>,
-    AxumPath((id, item_id)): AxumPath<(String, String)>,
-    Json(body): Json<CourseItemUpdate>,
-) -> Response {
-    let status = body.status.as_deref().and_then(CourseItemStatus::parse);
-    match state.store.update_course_item(
-        &id,
-        &item_id,
-        body.planned_at.as_deref(),
-        status,
-        body.note.as_deref(),
-        body.position,
-        body.estimated_minutes,
-    ) {
-        Ok(Some(item)) => Json(item).into_response(),
-        Ok(None) => api_error(StatusCode::NOT_FOUND, "course item not found"),
-        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    }
-}
-
-async fn delete_course_item(
-    State(state): State<Arc<AppState>>,
-    AxumPath((id, item_id)): AxumPath<(String, String)>,
-) -> Response {
-    match state.store.delete_course_item(&id, &item_id) {
-        Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct ReorderBody {
-    item_ids: Vec<String>,
-}
-
-async fn reorder_course(
-    State(state): State<Arc<AppState>>,
-    AxumPath(id): AxumPath<String>,
-    Json(body): Json<ReorderBody>,
-) -> Response {
-    match state.store.reorder_course_items(&id, &body.item_ids) {
-        Ok(()) => match course_detail_payload(&state.store, &id) {
-            Ok(payload) => Json(payload).into_response(),
-            Err(err) => api_error(StatusCode::NOT_FOUND, err.to_string()),
-        },
-        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    }
-}
-
-async fn auto_order_course(
-    State(state): State<Arc<AppState>>,
-    AxumPath(id): AxumPath<String>,
-) -> Response {
-    let items = match state.store.course_items(&id) {
-        Ok(items) => items,
-        Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    };
-    if items.is_empty() {
-        return match course_detail_payload(&state.store, &id) {
-            Ok(payload) => Json(payload).into_response(),
-            Err(err) => api_error(StatusCode::NOT_FOUND, err.to_string()),
-        };
-    }
-
-    use std::collections::{HashMap, HashSet, VecDeque};
-    let ids: HashSet<String> = items.iter().map(|item| item.topic_id.to_string()).collect();
-    let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
-    let mut indegree: HashMap<String, usize> = items
-        .iter()
-        .map(|item| (item.topic_id.to_string(), 0))
-        .collect();
-
-    for item in &items {
-        let edges = state
-            .store
-            .edges_for_topic(item.topic_id.as_str())
-            .unwrap_or_default();
-        for edge in edges {
-            if edge.kind != TopicEdgeKind::Prerequisite {
-                continue;
-            }
-            let from = edge.from_topic_id.to_string();
-            let to = edge.to_topic_id.to_string();
-            if !ids.contains(&from) || !ids.contains(&to) || from == to {
-                continue;
-            }
-            let list = adjacency.entry(from).or_default();
-            if !list.contains(&to) {
-                list.push(to.clone());
-                *indegree.entry(to).or_insert(0) += 1;
-            }
-        }
-    }
-
-    let mut queue: VecDeque<String> = items
-        .iter()
-        .filter(|item| indegree.get(item.topic_id.as_str()).copied().unwrap_or(0) == 0)
-        .map(|item| item.topic_id.to_string())
-        .collect();
-    let mut ordered = Vec::with_capacity(items.len());
-    while let Some(topic_id) = queue.pop_front() {
-        ordered.push(topic_id.clone());
-        if let Some(next) = adjacency.get(&topic_id) {
-            for target in next {
-                if let Some(value) = indegree.get_mut(target) {
-                    *value = value.saturating_sub(1);
-                    if *value == 0 {
-                        queue.push_back(target.clone());
-                    }
-                }
-            }
-        }
-    }
-    // 有环时保留剩余条目原顺序，至少不丢条目。
-    for item in &items {
-        let topic_id = item.topic_id.to_string();
-        if !ordered.contains(&topic_id) {
-            ordered.push(topic_id);
-        }
-    }
-
-    let ordered_item_ids: Vec<String> = ordered
-        .iter()
-        .filter_map(|topic_id| {
-            items
-                .iter()
-                .find(|item| item.topic_id.as_str() == topic_id)
-                .map(|item| item.id.to_string())
-        })
-        .collect();
-    if let Err(err) = state.store.reorder_course_items(&id, &ordered_item_ids) {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
-    }
-    match course_detail_payload(&state.store, &id) {
-        Ok(payload) => Json(payload).into_response(),
-        Err(err) => api_error(StatusCode::NOT_FOUND, err.to_string()),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct ScheduleBody {
-    start_date: Option<String>,
-    daily_minutes: Option<i64>,
-    study_days: Option<String>,
-}
-
-/// 按每天可用分钟数排期：同一学习日可以安排多个专题，直到当天预算用完。
-async fn auto_schedule_course(
-    State(state): State<Arc<AppState>>,
-    AxumPath(id): AxumPath<String>,
-    Json(body): Json<ScheduleBody>,
-) -> Response {
-    let course = match state.store.course(&id) {
-        Ok(Some(course)) => course,
-        Ok(None) => return api_error(StatusCode::NOT_FOUND, "course not found"),
-        Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    };
-    let items = match state.store.course_items(&id) {
-        Ok(items) => items,
-        Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    };
-    let start = body
-        .start_date
-        .clone()
-        .or(course.start_date.clone())
-        .unwrap_or_else(|| Utc::now().date_naive().to_string());
-    let start = match chrono::NaiveDate::parse_from_str(start.trim(), "%Y-%m-%d") {
-        Ok(date) => date,
-        Err(_) => return api_error(StatusCode::BAD_REQUEST, "start_date 需要 YYYY-MM-DD"),
-    };
-    let daily = body
-        .daily_minutes
-        .unwrap_or(course.daily_minutes)
-        .clamp(10, 1440);
-    let days_raw = body
-        .study_days
-        .as_deref()
-        .unwrap_or(course.study_days.as_str());
-    let mut days: std::collections::HashSet<u32> = days_raw
-        .split(',')
-        .filter_map(|value| value.trim().parse::<u32>().ok())
-        .filter(|value| (1..=7).contains(value))
-        .collect();
-    if days.is_empty() {
-        days.extend(1..=5);
-    }
-
-    if let Some(value) = body.daily_minutes {
-        let _ = state.store.update_course(
-            &id,
-            None,
-            None,
-            None,
-            None,
-            Some(value),
-            body.study_days.as_deref(),
-        );
-    }
-
-    let mut date = start;
-    while !days.contains(&date.weekday().number_from_monday()) {
-        date += chrono::Duration::days(1);
-    }
-    let mut remaining = daily;
-
-    for item in items.iter() {
-        let duration = item.estimated_minutes.max(1);
-        if remaining < duration && remaining < daily {
-            date = next_study_day(date, &days);
-            remaining = daily;
-        }
-        let value = date.format("%Y-%m-%d").to_string();
-        if let Err(err) = state.store.update_course_item(
-            &id,
-            item.id.as_str(),
-            Some(&value),
-            None,
-            None,
-            None,
-            None,
-        ) {
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
-        }
-        remaining -= duration;
-        if remaining <= 0 {
-            date = next_study_day(date, &days);
-            remaining = daily;
-        }
-    }
-
-    match course_detail_payload(&state.store, &id) {
-        Ok(payload) => Json(payload).into_response(),
-        Err(err) => api_error(StatusCode::NOT_FOUND, err.to_string()),
-    }
-}
-
-fn next_study_day(
-    mut date: chrono::NaiveDate,
-    days: &std::collections::HashSet<u32>,
-) -> chrono::NaiveDate {
-    for _ in 0..14 {
-        date += chrono::Duration::days(1);
-        if days.contains(&date.weekday().number_from_monday()) {
-            break;
-        }
-    }
-    date
-}
-
-#[derive(Debug, Deserialize)]
-struct ReminderQuery {
-    date: Option<String>,
-}
-
-async fn reminders(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<ReminderQuery>,
-) -> Response {
-    let today = query
-        .date
-        .unwrap_or_else(|| Utc::now().date_naive().to_string());
-    let mut due = Vec::new();
-    let courses = match state.store.all_courses() {
-        Ok(courses) => courses,
-        Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    };
-    for summary in courses {
-        let items = state
-            .store
-            .course_items(summary.course.id.as_str())
-            .unwrap_or_default();
-        for item in items {
-            if item.status == CourseItemStatus::Done {
-                continue;
-            }
-            let Some(planned) = item.planned_at.as_deref() else {
-                continue;
-            };
-            if planned > today.as_str() {
-                continue;
-            }
-            let topic = state.store.topic(item.topic_id.as_str()).ok().flatten();
-            due.push(json!({
-                "course_id": summary.course.id,
-                "course_title": summary.course.title,
-                "item": item,
-                "topic": topic,
-            }));
-        }
-    }
-    due.sort_by(|a, b| {
-        a["item"]["planned_at"]
-            .as_str()
-            .cmp(&b["item"]["planned_at"].as_str())
-    });
-    Json(json!({ "date": today, "due": due })).into_response()
-}
-
-async fn course_calendar(
-    State(state): State<Arc<AppState>>,
-    AxumPath(id): AxumPath<String>,
-) -> Response {
-    let course = match state.store.course(&id) {
-        Ok(Some(course)) => course,
-        Ok(None) => return api_error(StatusCode::NOT_FOUND, "course not found"),
-        Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    };
-    let items = state.store.course_items(&id).unwrap_or_default();
-    let mut out = String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//StudyDeck//Course//CN\r\nCALSCALE:GREGORIAN\r\nMETHOD:PUBLISH\r\n");
-    out.push_str(&format!("X-WR-CALNAME:{}\r\n", ics_escape(&course.title)));
-    let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    for item in &items {
-        let Some(planned) = item.planned_at.as_deref() else {
-            continue;
-        };
-        let Ok(start) = chrono::NaiveDate::parse_from_str(planned, "%Y-%m-%d") else {
-            continue;
-        };
-        let end = start + chrono::Duration::days(1);
-        let topic = state.store.topic(item.topic_id.as_str()).ok().flatten();
-        let title = format!(
-            "{} · {}",
-            course.title,
-            topic
-                .as_ref()
-                .map(|topic| topic.title.as_str())
-                .unwrap_or("专题")
-        );
-        let description = format!(
-            "课程：{}\n目标：{}\n状态：{}\n预计：{} 分钟",
-            course.title,
-            course.goal,
-            item.status.label_cn(),
-            item.estimated_minutes
-        );
-        out.push_str("BEGIN:VEVENT\r\n");
-        out.push_str(&format!("UID:{}@studydeck.local\r\n", item.id));
-        out.push_str(&format!("DTSTAMP:{stamp}\r\n"));
-        out.push_str(&format!(
-            "DTSTART;VALUE=DATE:{}\r\n",
-            start.format("%Y%m%d")
-        ));
-        out.push_str(&format!("DTEND;VALUE=DATE:{}\r\n", end.format("%Y%m%d")));
-        out.push_str(&format!("SUMMARY:{}\r\n", ics_escape(&title)));
-        out.push_str(&format!("DESCRIPTION:{}\r\n", ics_escape(&description)));
-        out.push_str("STATUS:CONFIRMED\r\n");
-        out.push_str("BEGIN:VALARM\r\nTRIGGER:-PT15H\r\nACTION:DISPLAY\r\n");
-        out.push_str(&format!("DESCRIPTION:{}\r\n", ics_escape(&title)));
-        out.push_str("END:VALARM\r\nEND:VEVENT\r\n");
-    }
-    out.push_str("END:VCALENDAR\r\n");
-    (
-        [
-            (
-                header::CONTENT_TYPE,
-                "text/calendar; charset=utf-8".to_string(),
-            ),
-            (
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"studydeck-{}.ics\"", id),
-            ),
-        ],
-        out,
-    )
-        .into_response()
-}
-
-fn ics_escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace(';', "\\;")
-        .replace(',', "\\,")
-        .replace('\n', "\\n")
-}
-
-fn course_detail_payload(store: &Store, id: &str) -> anyhow::Result<serde_json::Value> {
-    let course = store
-        .course(id)?
-        .ok_or_else(|| anyhow::anyhow!("course not found"))?;
-    let items = store.course_items(id)?;
-    let topics = store.all_topics()?;
-    let by_id: std::collections::HashMap<String, Topic> = topics
-        .into_iter()
-        .map(|topic| (topic.id.to_string(), topic))
-        .collect();
-    let positions: std::collections::HashMap<String, i64> = items
-        .iter()
-        .map(|item| (item.topic_id.to_string(), item.position))
-        .collect();
-
-    let mut payload_items = Vec::with_capacity(items.len());
-    for item in &items {
-        let edges = store
-            .edges_for_topic(item.topic_id.as_str())
-            .unwrap_or_default();
-        let prerequisites: Vec<serde_json::Value> = edges
-            .into_iter()
-            .filter(|edge| {
-                edge.kind == TopicEdgeKind::Prerequisite
-                    && edge.to_topic_id.as_str() == item.topic_id.as_str()
-            })
-            .map(|edge| {
-                let other_id = edge.from_topic_id.to_string();
-                let other = by_id.get(&other_id);
-                let position = positions.get(&other_id).copied();
-                let warning = match position {
-                    None => "不在课程中",
-                    Some(value) if value >= item.position => "排在本专题之后",
-                    _ => "",
-                };
-                json!({
-                    "topic_id": other_id,
-                    "title": other.map(|topic| topic.title.clone()).unwrap_or_else(|| "已删除专题".into()),
-                    "in_course": position.is_some(),
-                    "warning": warning,
-                })
-            })
-            .collect();
-
-        payload_items.push(json!({
-            "item": item,
-            "topic": by_id.get(item.topic_id.as_str()),
-            "prerequisites": prerequisites,
-        }));
-    }
-
-    let done = items
-        .iter()
-        .filter(|item| item.status == CourseItemStatus::Done)
-        .count();
-    Ok(json!({
-        "course": course,
-        "items": payload_items,
-        "progress": { "total": items.len(), "done": done },
-    }))
-}
-
 async fn delete_session(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
@@ -1698,6 +1150,25 @@ where
     ))
 }
 
+/// 卡片档位 → 三档深度；以实际使用的模板为准，避免前端用全局模板算错。
+fn depth_for_level(profile: &CardProfile, level: Option<&str>) -> Depth {
+    let Some(level) = level.and_then(|id| profile.level(id)) else {
+        return Depth::CanTune;
+    };
+    let index = profile
+        .levels
+        .iter()
+        .position(|item| item.id == level.id)
+        .unwrap_or(0);
+    if index == 0 {
+        Depth::CanUse
+    } else if index + 1 >= profile.levels.len() {
+        Depth::CanDerive
+    } else {
+        Depth::CanTune
+    }
+}
+
 fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Response> {
     let session_key = spec.session_id.to_string();
     let turn = match state.registry.open(&session_key, &spec.text) {
@@ -1714,6 +1185,14 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
     let history = state.store.messages(&session_key).unwrap_or_default();
     let topic = state.store.topic_for_session(&session_key).ok().flatten();
     let seed = state.store.session_seed(&session_key).ok().flatten();
+    // 续写同一张卡时，卡自己的范式/档位优先，避免跨领域追问被当前默认模板带跑。
+    let existing_card = spec
+        .card_id
+        .as_ref()
+        .filter(|_| spec.card_history.is_some())
+        .and_then(|id| state.store.card_by_id(id).ok().flatten())
+        .filter(|card| card.session_id == spec.session_id);
+    let session_profile = state.store.session_profile(&session_key).ok().flatten();
 
     // 第一轮用户消息自动成为标题，侧边栏才不会全是“未命名”。
     if spec.mode == Mode::Main {
@@ -1724,18 +1203,42 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
     // 卡片模板与档位：请求显式指定 > 当前默认模板 > 内置 tech
     let (resolved_profile, resolved_level) = match spec.mode {
         Mode::Card => {
-            let profile = spec
-                .profile_id
-                .as_deref()
+            let card_profile = existing_card
+                .as_ref()
+                .and_then(|card| card.profile_id.as_deref());
+            // 优先级：卡片自身 → 会话模板 → 请求指定 → 全局默认
+            let profile = card_profile
                 .and_then(|id| state.profiles.get(id))
+                .or_else(|| {
+                    session_profile
+                        .as_deref()
+                        .and_then(|id| state.profiles.get(id))
+                })
+                .or_else(|| {
+                    spec.profile_id
+                        .as_deref()
+                        .and_then(|id| state.profiles.get(id))
+                })
                 .or_else(|| state.profiles.active())
                 .unwrap_or_else(CardProfile::builtin_tech);
+            let requested_level = existing_card
+                .as_ref()
+                .and_then(|card| card.level.as_deref())
+                .or(spec.level.as_deref());
             let level = profile
-                .resolved_level(spec.level.as_deref())
+                .resolved_level(requested_level)
                 .map(|level| level.id.clone());
             (Some(profile), level)
         }
         Mode::Main => (None, None),
+    };
+
+    let resolved_depth = match spec.mode {
+        Mode::Card => resolved_profile
+            .as_ref()
+            .map(|profile| depth_for_level(profile, resolved_level.as_deref()))
+            .or(spec.depth),
+        Mode::Main => spec.depth,
     };
 
     // 嵌套展开的父卡（在主线上展开时为 None）
@@ -1744,7 +1247,7 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
         .as_ref()
         .and_then(|id| state.store.card_by_id(id).ok().flatten());
 
-    let (assistant_id, card_id) = match spec.mode {
+    let (assistant_id, card_id, card_is_new) = match spec.mode {
         Mode::Main => {
             let mut user = Message::user(&spec.session_id, spec.text.clone());
             let mut assistant = Message::assistant(&spec.session_id, "");
@@ -1766,44 +1269,94 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
                     err.to_string(),
                 ));
             }
-            (Some(assistant.id.0.clone()), None)
+            (Some(assistant.id.0.clone()), None, false)
         }
         Mode::Card => {
-            let anchor = spec.anchor.clone().unwrap_or_else(|| {
-                Anchor::new(
-                    studydeck_core::MessageId("unknown".into()),
-                    0,
-                    0,
-                    spec.text.clone(),
-                )
-            });
-            let stack_depth = nest_parent
-                .as_ref()
-                .map(|card| card.stack_depth + 1)
-                .unwrap_or(0);
-            let card = Card {
-                id: CardId::new(),
-                session_id: spec.session_id.clone(),
-                anchor,
-                depth: spec.depth.unwrap_or_default(),
-                profile_id: resolved_profile.as_ref().map(|profile| profile.id.clone()),
-                level: resolved_level.clone(),
-                parent_card_id: nest_parent.as_ref().map(|card| card.id.clone()),
-                stack_depth,
-                question: spec.text.clone(),
-                answer: String::new(),
-                promoted_session_id: None,
-                created_at: Utc::now(),
-            };
-            if let Err(err) = state.store.add_card(&card) {
-                return Err(api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    err.to_string(),
-                ));
+            // 追问续写同一张卡：卡就是一条探索线程，不再每轮新建
+            // 只有「追问」（带 card_history）才续写原卡；换档/重新生成仍按旧逻辑建新卡
+            if let Some(card) = existing_card.clone() {
+                (None, Some(card.id), false)
+            } else {
+                let anchor = spec.anchor.clone().unwrap_or_else(|| {
+                    Anchor::new(
+                        studydeck_core::MessageId("unknown".into()),
+                        0,
+                        0,
+                        spec.text.clone(),
+                    )
+                });
+                let stack_depth = nest_parent
+                    .as_ref()
+                    .map(|card| card.stack_depth + 1)
+                    .unwrap_or(0);
+                let card = Card {
+                    id: CardId::new(),
+                    session_id: spec.session_id.clone(),
+                    anchor,
+                    depth: resolved_depth.unwrap_or_default(),
+                    profile_id: resolved_profile.as_ref().map(|profile| profile.id.clone()),
+                    level: resolved_level.clone(),
+                    parent_card_id: nest_parent.as_ref().map(|card| card.id.clone()),
+                    stack_depth,
+                    question: spec.text.clone(),
+                    answer: String::new(),
+                    promoted_session_id: None,
+                    created_at: Utc::now(),
+                };
+                if let Err(err) = state.store.add_card(&card) {
+                    return Err(api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        err.to_string(),
+                    ));
+                }
+                (None, Some(card.id), true)
             }
-            (None, Some(card.id))
         }
     };
+
+    // 续写时以库里的轮次为准；同时给老卡懒回填 card_turns
+    let mut card_history = spec.card_history.clone();
+    let mut turn_ids: Option<(String, String)> = None;
+    if let Some(id) = card_id.as_ref() {
+        let existing_turns = state
+            .store
+            .card_by_id(id.as_str())
+            .ok()
+            .flatten()
+            .and_then(|card| state.store.ensure_card_turns(&card).ok())
+            .unwrap_or_default();
+        if !card_is_new {
+            card_history = Some(thread_history(&existing_turns));
+        }
+
+        let now = Utc::now();
+        let seq = state.store.next_turn_seq(id.as_str()).unwrap_or(0);
+        let user_turn = CardTurn {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            card_id: id.clone(),
+            seq,
+            role: TurnRole::User,
+            text: spec.text.clone(),
+            level: resolved_level.clone(),
+            profile_id: resolved_profile.as_ref().map(|profile| profile.id.clone()),
+            status: TurnStatus::Done,
+            created_at: now,
+        };
+        let assistant_turn = CardTurn {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            card_id: id.clone(),
+            seq: seq + 1,
+            role: TurnRole::Assistant,
+            text: String::new(),
+            level: resolved_level.clone(),
+            profile_id: resolved_profile.as_ref().map(|profile| profile.id.clone()),
+            status: TurnStatus::Streaming,
+            created_at: now,
+        };
+        let _ = state.store.add_card_turn(&user_turn);
+        let _ = state.store.add_card_turn(&assistant_turn);
+        turn_ids = Some((user_turn.id, assistant_turn.id));
+    }
 
     let parent_card = spec.card_id.as_ref().and_then(|id| {
         state.store.cards(&session_key).ok().and_then(|cards| {
@@ -1824,9 +1377,9 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
         mode: spec.mode,
         text: spec.text.clone(),
         anchor: spec.anchor.clone(),
-        depth: spec.depth,
+        depth: resolved_depth,
         parent_card: nest_parent.clone().or(parent_card),
-        card_history: spec.card_history,
+        card_history,
         topic,
         seed,
         project_root,
@@ -1865,6 +1418,7 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
         let store = state.store.clone();
         let assistant = assistant_id.clone();
         let card = card_id.clone();
+        let turn_ids = turn_ids.clone();
         let progress = progress.clone();
         let question = spec.text.clone();
         tokio::spawn(async move {
@@ -1886,8 +1440,15 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
                     last_write = Instant::now();
                     if let Some(id) = assistant.as_deref() {
                         let _ = store.update_message_text(id, &buffer);
-                    } else if let Some(id) = card.as_ref() {
-                        let _ = store.update_card(id.as_str(), &buffer, &question);
+                    } else {
+                        if let Some((_, aid)) = turn_ids.as_ref() {
+                            let _ = store.update_card_turn(aid, &buffer, "streaming");
+                        }
+                        if card_is_new {
+                            if let Some(id) = card.as_ref() {
+                                let _ = store.update_card(id.as_str(), &buffer, &question);
+                            }
+                        }
                     }
                 }
             }
@@ -1903,6 +1464,7 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
         let provider = state.provider();
         let assistant = assistant_id.clone();
         let card = card_id.clone();
+        let turn_ids = turn_ids.clone();
         let question = request.text.clone();
         let request = request.clone();
         let sender = tx.clone();
@@ -1962,8 +1524,18 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
             if let Some(id) = assistant.as_deref() {
                 let _ = state.store.set_message_status(id, status, Some(&text));
             }
-            if let Some(id) = card.as_ref() {
-                let _ = state.store.update_card(id.as_str(), &text, &question);
+            if let Some((_, aid)) = turn_ids.as_ref() {
+                let turn_status = match final_state {
+                    TurnState::Ok => "done",
+                    TurnState::Cancelled => "aborted",
+                    _ => "error",
+                };
+                let _ = state.store.update_card_turn(aid, &text, turn_status);
+            }
+            if card_is_new {
+                if let Some(id) = card.as_ref() {
+                    let _ = state.store.update_card(id.as_str(), &text, &question);
+                }
             }
             let (turn_id, session_id) = {
                 let guard = turn.lock().expect("turn poisoned");
@@ -2321,11 +1893,20 @@ async fn add_glossary(
     if term.is_empty() {
         return api_error(StatusCode::BAD_REQUEST, "term 不能为空");
     }
+    // 账本按卡片的领域归属，而不是当前全局默认模板；否则跨领域会记错范式/档位。
+    let mut profile_id = body.profile_id.clone();
+    let mut level = body.level.clone();
+    if let Some(card_id) = body.card_id.as_deref() {
+        if let Ok(Some(card)) = state.store.card_by_id(card_id) {
+            profile_id = card.profile_id.clone();
+            level = card.level.clone();
+        }
+    }
     match state.store.record_encounter(
         &term,
         &body.gist,
-        body.profile_id.as_deref(),
-        body.level.as_deref(),
+        profile_id.as_deref(),
+        level.as_deref(),
         body.anchor.as_ref(),
         session_id.as_ref(),
         body.parent_card_id.as_deref(),
@@ -2421,6 +2002,41 @@ async fn maintain_storage(State(state): State<Arc<AppState>>) -> impl IntoRespon
             Json(json!({ "ok": true, "report": report, "counts": counts })).into_response()
         }
         Ok(Err(err)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+/// 把线程压成给模型看的上下文；只用于续写，不落库。
+fn thread_history(turns: &[CardTurn]) -> String {
+    let mut out = String::new();
+    for turn in turns {
+        match turn.role {
+            TurnRole::User => {
+                out.push_str("\n\n【追问】\n");
+                out.push_str(turn.text.trim());
+            }
+            TurnRole::Assistant => {
+                out.push_str("\n\n【");
+                out.push_str(if out.is_empty() { "解释" } else { "回答" });
+                out.push_str("】\n");
+                out.push_str(turn.text.trim());
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+async fn card_detail(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    match state.store.card_by_id(&id) {
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "卡片不存在").into_response(),
+        Ok(Some(card)) => match state.store.ensure_card_turns(&card) {
+            Ok(turns) => Json(json!({ "card": card, "turns": turns })).into_response(),
+            Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        },
         Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
@@ -2686,12 +2302,14 @@ async fn entry_detail(
         .entry_path(&id)
         .unwrap_or_default()
         .into_iter()
-        .map(|card| json!({
-            "id": card.id,
-            "quote": card.anchor.quote,
-            "question": card.question,
-            "depth": card.stack_depth,
-        }))
+        .map(|card| {
+            json!({
+                "id": card.id,
+                "quote": card.anchor.quote,
+                "question": card.question,
+                "depth": card.stack_depth,
+            })
+        })
         .collect::<Vec<_>>();
     let (parents, children) = state.store.entry_relations(&id).unwrap_or_default();
     let all = state.store.all_entries().unwrap_or_default();
