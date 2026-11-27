@@ -57,8 +57,11 @@ export interface Message {
   turn_id?: string | null
 }
 
+export type CardKind = 'explain' | 'ask'
+
 export interface CardRecord {
   id: string
+  kind?: CardKind
   session_id: string
   anchor: Anchor
   depth: Depth
@@ -233,6 +236,8 @@ export interface ChatBody {
   mode: 'main' | 'card'
   text: string
   anchor?: Anchor
+  /** 卡片类型：解释 / 手动问答 */
+  kind?: CardKind
   depth?: Depth
   profile_id?: string
   level?: string
@@ -305,8 +310,8 @@ export interface SessionSummary {
 
 export interface PromotionResult {
   session_id: string
-  topic_id: string
-  topic: Topic
+  topic_id: string | null
+  topic: Topic | null
   seed: SessionOrigin
 }
 

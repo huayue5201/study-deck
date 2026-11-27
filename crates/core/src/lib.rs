@@ -13,7 +13,7 @@ pub mod session;
 pub mod topic;
 
 pub use anchor::Anchor;
-pub use card::{Card, CardTurn, Depth, TurnRole, TurnStatus};
+pub use card::{Card, CardKind, CardTurn, Depth, TurnRole, TurnStatus};
 pub use context::{Block, BlockRole, ContextAssembler, Mode, TurnRequest};
 pub use event::{AgentEvent, Usage};
 pub use glossary::{Encounter, GlossaryEntry, Mastery};

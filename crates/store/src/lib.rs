@@ -7,9 +7,9 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use studydeck_core::{
-    Anchor, Card, CardId, CardTurn, Depth, Encounter, GlossaryEntry, Mastery, Message,
+    Anchor, Card, CardId, CardKind, CardTurn, Depth, Encounter, GlossaryEntry, Mastery, Message,
     MessageStatus, Role, Session, SessionId, SessionSeed, Topic, TopicEdge, TopicEdgeId,
-    TopicEdgeKind, TopicNode, TopicNodeId, TopicNodeStatus, TurnRole, TurnStatus,
+    TopicEdgeKind, TopicId, TopicNode, TopicNodeId, TopicNodeStatus, TurnRole, TurnStatus,
 };
 
 const BASE_SCHEMA: &str = r#"
@@ -132,12 +132,12 @@ pub struct SessionSummary {
     pub origin: Option<SessionOriginSummary>,
 }
 
-/// 一次“卡片 -> 专题会话”的升级结果。幂等：重复升级同一张卡返回同一个会话。
+/// 一次“卡片 -> 学习会话”的展开结果。幂等：重复展开同一张卡返回同一个会话。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Promotion {
     pub session_id: String,
-    pub topic_id: String,
-    pub topic: Topic,
+    pub topic_id: Option<String>,
+    pub topic: Option<Topic>,
     pub seed: SessionSeed,
 }
 
@@ -237,6 +237,7 @@ fn migrate(conn: &Connection) -> Result<()> {
                     card_id            TEXT NOT NULL,
                     quote              TEXT NOT NULL,
                     context            TEXT NOT NULL DEFAULT '',
+                    question           TEXT NOT NULL DEFAULT '',
                     answer             TEXT NOT NULL DEFAULT '',
                     depth              TEXT NOT NULL,
                     metadata           TEXT NOT NULL DEFAULT '{}'
@@ -383,6 +384,14 @@ fn migrate(conn: &Connection) -> Result<()> {
                 "CREATE INDEX IF NOT EXISTS idx_entries_review ON entries(next_review_at);
                  UPDATE entries SET next_review_at = created_at WHERE next_review_at IS NULL;",
             )?;
+            Ok(())
+        }),
+        (19, |c| {
+            ensure_column(c, "session_seeds", "question", "TEXT NOT NULL DEFAULT ''")?;
+            Ok(())
+        }),
+        (18, |c| {
+            ensure_column(c, "cards", "kind", "TEXT NOT NULL DEFAULT 'explain'")?;
             Ok(())
         }),
         (17, |c| {
@@ -550,7 +559,7 @@ impl Store {
         Ok(())
     }
 
-    /// 删会话连同它的消息、卡片、升级链接和 cwd 绑定。
+    /// 删会话连同它的消息、卡片、展开链接和 cwd 绑定。
     /// 账本条目保留（那是知识，不是会话）；专题只在没有其它会话时清理。
     /// 删一个会话的所有子行（消息/卡片/遭遇/用量/链接/seeds）；返回它所属专题。
     /// `delete_session` 和 `delete_topic` 共用这一份，避免两处漏表。
@@ -896,8 +905,8 @@ impl Store {
 
     pub fn add_card(&self, card: &Card) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO cards (id, session_id, message_id, char_start, char_end, quote, depth, question, answer, created_at, profile_id, level, parent_card_id, stack_depth)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO cards (id, session_id, message_id, char_start, char_end, quote, depth, kind, question, answer, created_at, profile_id, level, parent_card_id, stack_depth)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 card.id.as_str(),
                 card.session_id.as_str(),
@@ -906,6 +915,7 @@ impl Store {
                 card.anchor.char_end as i64,
                 card.anchor.quote,
                 card.depth.as_str(),
+                card.kind.as_str(),
                 card.question,
                 card.answer,
                 card.created_at.to_rfc3339(),
@@ -930,7 +940,7 @@ impl Store {
         Ok(self
             .conn()
             .query_row(
-                "SELECT id, session_id, message_id, char_start, char_end, quote, depth, question,
+                "SELECT id, session_id, message_id, char_start, char_end, quote, depth, kind, question,
                         answer, created_at, promoted_session_id, profile_id, level, parent_card_id, stack_depth
                  FROM cards WHERE id = ?1",
                 params![id],
@@ -1194,7 +1204,7 @@ impl Store {
             "DELETE FROM turn_usage WHERE session_id NOT IN (SELECT id FROM sessions)",
             [],
         )?;
-        // 升级链断掉的卡片：父卡没了，子卡跟着变成根（不然永远藏在树里）
+        // 展开链断掉的卡片：父卡没了，子卡跟着变成根（不然永远藏在树里）
         report.reattached_cards = conn.execute(
             "UPDATE cards SET parent_card_id = NULL
               WHERE parent_card_id IS NOT NULL
@@ -1216,7 +1226,7 @@ impl Store {
     pub fn cards(&self, session_id: &str) -> Result<Vec<Card>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, message_id, char_start, char_end, quote, depth, question, answer,
+            "SELECT id, session_id, message_id, char_start, char_end, quote, depth, kind, question, answer,
                     created_at, promoted_session_id
              , profile_id, level, parent_card_id, stack_depth
              FROM cards WHERE session_id = ?1 ORDER BY rowid ASC",
@@ -1569,7 +1579,7 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    // ---------- 专题 / 升级 ----------
+    // ---------- 专题 / 展开 ----------
 
     pub fn topic(&self, id: &str) -> Result<Option<Topic>> {
         load_topic(&self.conn(), id)
@@ -2074,8 +2084,8 @@ impl Store {
         load_seed(&self.conn(), session_id)
     }
 
-    /// 把一张卡片升级成“专题 + 新会话”，并保存来源链。
-    /// 幂等：同一张卡重复调用返回同一个会话，不会产生重复专题。
+    /// 把一张卡片展开成“独立学习会话”，并保存来源链（只带当前卡）。
+    /// 不创建专题；幂等：同一张卡重复调用返回同一个会话。
     pub fn promote_card(
         &self,
         session_id: &str,
@@ -2083,7 +2093,6 @@ impl Store {
         title: Option<&str>,
         depth_goal: Option<Depth>,
         metadata: Option<serde_json::Value>,
-        target_topic_id: Option<&str>,
     ) -> Result<Promotion> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
@@ -2095,14 +2104,13 @@ impl Store {
         }
 
         if let Some(existing) = card.promoted_session_id.as_ref() {
-            let topic = load_topic_for_session(&tx, existing.as_str())?
-                .with_context(|| format!("promoted topic missing for session {existing}"))?;
+            let topic = load_topic_for_session(&tx, existing.as_str())?;
             let seed = load_seed(&tx, existing.as_str())?
                 .with_context(|| format!("promoted seed missing for session {existing}"))?;
             tx.commit()?;
             return Ok(Promotion {
                 session_id: existing.to_string(),
-                topic_id: topic.id.to_string(),
+                topic_id: topic.as_ref().map(|topic| topic.id.to_string()),
                 topic,
                 seed,
             });
@@ -2130,74 +2138,42 @@ impl Store {
             .unwrap_or_else(|| card.anchor.quote.clone());
 
         let depth = depth_goal.unwrap_or(card.depth);
-        let topic = if let Some(topic_id) = target_topic_id {
-            load_topic(&tx, topic_id)?.with_context(|| format!("topic not found: {topic_id}"))?
+        let title = clean_title(title.unwrap_or(&card.anchor.quote));
+        let title = if title.is_empty() {
+            "新会话".to_string()
         } else {
-            let title = clean_title(title.unwrap_or(&card.anchor.quote));
-            let title = if title.is_empty() {
-                "未命名专题".to_string()
-            } else {
-                title
-            };
-            let mut topic = Topic::new(title, summarize(&card.answer), depth);
-            if let Some(value) = metadata {
-                topic.metadata = value;
-            }
-            let topic_metadata =
-                serde_json::to_string(&topic.metadata).unwrap_or_else(|_| "{}".into());
-            tx.execute(
-                "INSERT INTO topics (id, title, summary, depth_goal, mastery, created_at, metadata, outline_md)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    topic.id.as_str(),
-                    topic.title,
-                    topic.summary,
-                    topic.depth_goal.as_str(),
-                    topic.mastery.as_str(),
-                    topic.created_at.to_rfc3339(),
-                    topic_metadata,
-                    topic.outline_md
-                ],
-            )?;
-            topic
+            title
         };
-        let topic_metadata = serde_json::to_string(&topic.metadata).unwrap_or_else(|_| "{}".into());
 
         let new_session = SessionId::new();
         let now = Utc::now().to_rfc3339();
         tx.execute(
             "INSERT INTO sessions (id, title, created_at, updated_at, topic_id, profile_id)
-             VALUES (?1, ?2, ?3, ?3, ?4,
-                     (SELECT profile_id FROM sessions WHERE id = ?5))",
-            params![
-                new_session.as_str(),
-                topic.title,
-                now,
-                topic.id.as_str(),
-                session_id
-            ],
+             VALUES (?1, ?2, ?3, ?3, NULL,
+                     (SELECT profile_id FROM sessions WHERE id = ?4))",
+            params![new_session.as_str(), title, now, session_id],
         )?;
 
-        let seed_metadata = topic_metadata.clone();
         let seed = SessionSeed {
             session_id: new_session.clone(),
-            topic_id: topic.id.clone(),
-            topic_title: topic.title.clone(),
+            topic_id: TopicId::from(""),
+            topic_title: title.clone(),
             source_session_id: card.session_id.clone(),
             source_title: parent_title,
             source_message_id: card.anchor.message_id.clone(),
             card_id: card.id.clone(),
             quote: card.anchor.quote.clone(),
             context,
+            question: card.question.clone(),
             answer: card.answer.clone(),
-            depth: card.depth,
-            metadata: topic.metadata.clone(),
+            depth,
+            metadata: metadata.unwrap_or_else(|| serde_json::json!({})),
         };
         tx.execute(
             "INSERT INTO session_seeds
                 (session_id, topic_id, topic_title, source_session_id, source_title,
-                 source_message_id, card_id, quote, context, answer, depth, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 source_message_id, card_id, quote, context, question, answer, depth, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 seed.session_id.as_str(),
                 seed.topic_id.as_str(),
@@ -2208,9 +2184,10 @@ impl Store {
                 seed.card_id.as_str(),
                 seed.quote,
                 seed.context,
+                seed.question,
                 seed.answer,
                 seed.depth.as_str(),
-                seed_metadata
+                serde_json::to_string(&seed.metadata).unwrap_or_else(|_| "{}".into())
             ],
         )?;
         tx.execute(
@@ -2233,8 +2210,8 @@ impl Store {
         tx.commit()?;
         Ok(Promotion {
             session_id: new_session.to_string(),
-            topic_id: topic.id.to_string(),
-            topic,
+            topic_id: None,
+            topic: None,
             seed,
         })
     }
@@ -2301,10 +2278,16 @@ fn map_card(row: &Row<'_>) -> rusqlite::Result<Card> {
             quote: row.get(5)?,
         },
         depth: Depth::parse(&row.get::<_, String>(6)?).unwrap_or_default(),
-        question: row.get(7)?,
-        answer: row.get(8)?,
-        created_at: parse_dt(&row.get::<_, String>(9)?),
-        promoted_session_id: row.get::<_, Option<String>>(10)?.map(SessionId::from),
+        kind: row
+            .get::<_, Option<String>>("kind")
+            .ok()
+            .flatten()
+            .and_then(|value| CardKind::parse(&value))
+            .unwrap_or_default(),
+        question: row.get(8)?,
+        answer: row.get(9)?,
+        created_at: parse_dt(&row.get::<_, String>(10)?),
+        promoted_session_id: row.get::<_, Option<String>>(11)?.map(SessionId::from),
         profile_id: row.get::<_, Option<String>>("profile_id").ok().flatten(),
         level: row.get::<_, Option<String>>("level").ok().flatten(),
         parent_card_id: row
@@ -2323,7 +2306,7 @@ fn map_card(row: &Row<'_>) -> rusqlite::Result<Card> {
 fn load_card(conn: &Connection, id: &str) -> Result<Option<Card>> {
     Ok(conn
         .query_row(
-            "SELECT id, session_id, message_id, char_start, char_end, quote, depth, question,
+            "SELECT id, session_id, message_id, char_start, char_end, quote, depth, kind, question,
                     answer, created_at, promoted_session_id
              FROM cards WHERE id = ?1",
             params![id],
@@ -2373,11 +2356,11 @@ fn load_seed(conn: &Connection, session_id: &str) -> Result<Option<SessionSeed>>
     Ok(conn
         .query_row(
             "SELECT session_id, topic_id, topic_title, source_session_id, source_title,
-                    source_message_id, card_id, quote, context, answer, depth, metadata
+                    source_message_id, card_id, quote, context, question, answer, depth, metadata
              FROM session_seeds WHERE session_id = ?1",
             params![session_id],
             |row| {
-                let metadata: String = row.get(11)?;
+                let metadata: String = row.get(12)?;
                 Ok(SessionSeed {
                     session_id: row.get::<_, String>(0)?.into(),
                     topic_id: row.get::<_, String>(1)?.into(),
@@ -2388,8 +2371,9 @@ fn load_seed(conn: &Connection, session_id: &str) -> Result<Option<SessionSeed>>
                     card_id: row.get::<_, String>(6)?.into(),
                     quote: row.get(7)?,
                     context: row.get(8)?,
-                    answer: row.get(9)?,
-                    depth: Depth::parse(&row.get::<_, String>(10)?).unwrap_or_default(),
+                    question: row.get(9)?,
+                    answer: row.get(10)?,
+                    depth: Depth::parse(&row.get::<_, String>(11)?).unwrap_or_default(),
                     metadata: serde_json::from_str(&metadata)
                         .unwrap_or_else(|_| serde_json::json!({})),
                 })
@@ -2407,20 +2391,6 @@ fn clean_title(text: &str) -> String {
         .join(" ")
         .chars()
         .take(60)
-        .collect()
-}
-
-fn summarize(text: &str) -> String {
-    let clean: String = text
-        .chars()
-        .filter(|ch| !matches!(ch, '#' | '*' | '`' | '>'))
-        .collect();
-    clean
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(200)
         .collect()
 }
 
@@ -2520,7 +2490,7 @@ fn parse_dt(value: &str) -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use studydeck_core::{Anchor, Card, CardId, Depth, Encounter, Message, Topic};
+    use studydeck_core::{Anchor, Card, CardId, CardKind, Depth, Message, Topic};
 
     #[test]
     fn maintain_cleans_orphans_but_keeps_live_usage() {
@@ -2598,7 +2568,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_card_creates_topic_and_is_idempotent() {
+    fn promote_card_creates_standalone_session_and_is_idempotent() {
         let path = std::env::temp_dir().join(format!(
             "studydeck-promote-{}-{}.db",
             std::process::id(),
@@ -2615,6 +2585,7 @@ mod tests {
             session_id: session.id.clone(),
             anchor,
             depth: Depth::CanDerive,
+            kind: CardKind::Explain,
             question: "请解释这段内容。".into(),
             answer: "**一句话定义**：采样率是每秒样本数。".into(),
             promoted_session_id: None,
@@ -2633,42 +2604,28 @@ mod tests {
                 Some("采样率"),
                 Some(Depth::CanDerive),
                 None,
-                None,
             )
             .expect("promote");
-        assert_eq!(promotion.topic.title, "采样率");
-        assert_eq!(promotion.seed.quote, "采样率");
-        assert!(promotion.seed.source_session_id.as_str() == session.id.as_str());
+        assert!(promotion.topic.is_none());
+        assert!(promotion.topic_id.is_none());
         assert!(store
             .topic_for_session(&promotion.session_id)
             .unwrap()
-            .is_some());
+            .is_none());
+        assert_eq!(promotion.seed.quote, "采样率");
+        assert_eq!(promotion.seed.question, "请解释这段内容。");
+        assert!(promotion.seed.source_session_id.as_str() == session.id.as_str());
         let again = store
-            .promote_card(
-                session.id.as_str(),
-                card.id.as_str(),
-                None,
-                None,
-                None,
-                None,
-            )
+            .promote_card(session.id.as_str(), card.id.as_str(), None, None, None)
             .expect("idempotent promote");
         assert_eq!(again.session_id, promotion.session_id);
-        assert_eq!(again.topic_id, promotion.topic_id);
+        assert!(again.topic.is_none());
 
         store
             .delete_session(&promotion.session_id)
             .expect("delete promoted session");
-        assert!(store.topic(&promotion.topic_id).unwrap().is_none());
         let recreated = store
-            .promote_card(
-                session.id.as_str(),
-                card.id.as_str(),
-                None,
-                None,
-                None,
-                None,
-            )
+            .promote_card(session.id.as_str(), card.id.as_str(), None, None, None)
             .expect("re-promote after delete");
         assert_ne!(recreated.session_id, promotion.session_id);
 
@@ -2854,6 +2811,7 @@ mod tests {
             session_id: session.id.clone(),
             anchor: anchor.clone(),
             depth: Depth::CanTune,
+            kind: CardKind::Explain,
             question: "请解释这段内容。".into(),
             answer: "首答\n\n---\n\n**追问：** 为什么？\n\n因为采样定理。".into(),
             promoted_session_id: None,

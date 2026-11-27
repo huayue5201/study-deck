@@ -2,7 +2,7 @@
 //! 这是整个项目里最值钱的 300 行。
 
 use studydeck_core::{
-    profiles::CardProfile, Anchor, Block, ContextAssembler, Depth, Message, Mode, Role,
+    profiles::CardProfile, Anchor, Block, CardKind, ContextAssembler, Depth, Message, Mode, Role,
     SessionSeed, Topic, TurnRequest,
 };
 
@@ -40,6 +40,13 @@ const CARD_CHAT_SYSTEM: &str = r#"你是卡片里的学习对话助手。用户�
 - 只围绕当前问题，需要引用前文时一句话带过；
 - 保持当前理解深度，不要突然展开成教科书。
 "#;
+
+const CARD_ASK_SYSTEM: &str = r#"你是卡片里的学习对话助手。用户选中了一段文字，并提出了一个具体问题。
+直接回答问题本身，不要套用任何固定小节、模板或掌握档位。
+- 先给结论，再给必要的解释；
+- 篇幅跟着问题走，别为了完整而扩写；
+- 需要时可以用短列表或代码，但不要重复选区原文；
+- 只回答用户问的，不主动扩成教程。"#;
 
 /// 老的完整历史不再整段发送：只保留关键线索，避免长会话每轮重复付费。
 fn compact_history(messages: &[Message], max_chars: usize) -> String {
@@ -99,7 +106,7 @@ fn topic_block(topic: &Topic) -> String {
 }
 
 fn seed_block(seed: &SessionSeed, first_turn: bool, wants_map: bool) -> String {
-    let mut out = String::from("本会话是从一次阅读支线升级而来的专题，不是普通闲聊。\n");
+    let mut out = String::from("本会话是从一张卡片展开的独立学习会话，不是普通闲聊。\n");
     out.push_str(&format!("专题：{}\n", seed.topic_title));
     out.push_str(&format!(
         "来源：{} 中的「{}」\n",
@@ -109,9 +116,12 @@ fn seed_block(seed: &SessionSeed, first_turn: bool, wants_map: bool) -> String {
     if !seed.context.trim().is_empty() {
         out.push_str(&format!("\n【起点上下文】\n{}\n", seed.context));
     }
+    if !seed.question.trim().is_empty() {
+        out.push_str(&format!("\n【这张卡的问题】\n{}\n", seed.question.trim()));
+    }
     if !seed.answer.trim().is_empty() {
         let answer: String = seed.answer.chars().take(800).collect();
-        out.push_str(&format!("\n【卡片已有解释（不要重复）】\n{answer}\n"));
+        out.push_str(&format!("\n【这张卡目前的回答（不要重复）】\n{answer}\n"));
     }
     out.push_str(&format!("\n目标深度：{}。\n", seed.depth.label_cn()));
     if first_turn && wants_map {
@@ -121,7 +131,7 @@ fn seed_block(seed: &SessionSeed, first_turn: bool, wants_map: bool) -> String {
     } else if first_turn {
         out.push_str("先回答用户当前的问题；不要强行先给学习地图。用户明确要“学习地图”时再给。\n");
     } else {
-        out.push_str("继续围绕这个专题回答，保持与学习地图一致，不要重复卡片已有解释。\n");
+        out.push_str("继续围绕这次学习目标回答，不要重复卡片已有的回答。\n");
     }
     out
 }
@@ -190,12 +200,20 @@ impl ContextAssembler for MainAssembler {
 impl ContextAssembler for CardAssembler {
     fn assemble(&self, request: &TurnRequest) -> Vec<Block> {
         let depth = request.depth.unwrap_or(Depth::CanTune);
+        let kind = request.card_kind.unwrap_or_default();
+        let ask = kind == CardKind::Ask;
         let follow_up = request.card_history.is_some();
         let profile = &self.profile;
-        let level = profile.resolved_level(request.level.as_deref());
+        let level = if ask {
+            None
+        } else {
+            profile.resolved_level(request.level.as_deref())
+        };
 
         let mut system = String::new();
-        if follow_up {
+        if ask {
+            system.push_str(CARD_ASK_SYSTEM);
+        } else if follow_up {
             // 卡片内的追问：不复述模板小节，像对话一样答
             system.push_str(CARD_CHAT_SYSTEM);
         } else {
@@ -213,7 +231,9 @@ impl ContextAssembler for CardAssembler {
             ));
         }
 
-        if let Some(level) = level {
+        if ask {
+            // 手动问答不绑定模板档位
+        } else if let Some(level) = level {
             let parenthetical = if profile.axis_label.trim().is_empty() {
                 String::new()
             } else {
@@ -271,11 +291,15 @@ impl ContextAssembler for CardAssembler {
         };
 
         let mut user = String::new();
-        user.push_str("【目标术语】\n");
+        if ask {
+            user.push_str("【选中的文字】\n");
+        } else {
+            user.push_str("【目标术语】\n");
+        }
         user.push_str(&anchor.quote);
         user.push_str("\n\n【它出现的位置（前后文）】\n");
         user.push_str(&window);
-        if level.is_none() {
+        if !ask && level.is_none() {
             user.push_str("\n\n【读者要的理解深度】");
             user.push_str(depth.label_cn());
             user.push('\n');
@@ -316,7 +340,7 @@ pub fn describe(mode: Mode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use studydeck_core::{profiles::CardProfile, BlockRole, CardId, MessageId, SessionId, TopicId};
+    use studydeck_core::{BlockRole, CardId, MessageId, SessionId, TopicId};
 
     fn seed() -> SessionSeed {
         SessionSeed {
@@ -329,6 +353,7 @@ mod tests {
             card_id: CardId::from("card"),
             quote: "采样率".into(),
             context: "采样率决定离散化的下界。".into(),
+            question: "为什么采样率要两倍带宽？".into(),
             answer: "采样率是每秒样本数。".into(),
             depth: Depth::CanDerive,
             metadata: serde_json::json!({}),
@@ -346,6 +371,7 @@ mod tests {
             topic: None,
             seed: Some(seed()),
             project_root: None,
+            card_kind: None,
             profile: None,
             level: None,
             locale: None,
@@ -390,6 +416,7 @@ mod tests {
             topic: None,
             seed: None,
             project_root: None,
+            card_kind: None,
             profile: None,
             level: None,
             locale: None,
@@ -419,6 +446,7 @@ mod tests {
             topic: None,
             seed: None,
             project_root: None,
+            card_kind: None,
             profile: None,
             level: None,
             locale: None,
@@ -480,6 +508,7 @@ mod tests {
             topic: Some(topic),
             seed: None,
             project_root: None,
+            card_kind: None,
             profile: None,
             level: None,
             locale: None,
@@ -513,6 +542,7 @@ mod profile_tests {
                 "采样率",
             )),
             depth: Some(Depth::CanTune),
+            card_kind: None,
             profile,
             level: level.map(|value| value.to_string()),
             locale: None,
@@ -524,6 +554,18 @@ mod profile_tests {
             project_root: None,
             history: vec![],
         }
+    }
+
+    #[test]
+    fn ask_card_skips_template_sections_and_levels() {
+        let profile = CardProfile::builtin_language_en();
+        let mut request = card_request(Some(profile), Some("use"));
+        request.card_kind = Some(CardKind::Ask);
+        let blocks = CardAssembler::new(request.profile.clone()).assemble(&request);
+        let system = &blocks[0].text;
+        assert!(system.contains("直接回答问题本身"));
+        assert!(!system.contains("本次档位"));
+        assert!(!system.contains("严格按以下小节输出"));
     }
 
     #[test]

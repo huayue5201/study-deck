@@ -2,13 +2,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { renderMarkdown } from '../lib/markdown'
 import { useI18n } from '../lib/i18n'
 import { isImeComposing } from '../lib/ime'
-import type { Anchor, CardProfile } from '../lib/types'
+import type { Anchor, CardKind, CardProfile } from '../lib/types'
 
 export interface OpenCardState {
   /** 稳定的客户端身份：id 还没回来时也能区分卡片 */
   localId: string
   id: string | null
   anchor: Anchor
+  kind: CardKind
   level: string
   question: string
   answer: string
@@ -107,6 +108,8 @@ export function Card({
   // 「在同一处再问一个」的内联输入
   const [branching, setBranching] = useState(false)
   const [branchDraft, setBranchDraft] = useState('')
+  // 长解释默认只露一个摘要，避免整张卡被正文撑满
+  const [expanded, setExpanded] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
   const stackRef = useRef<HTMLDivElement | null>(null)
   const drag = useRef<{ dx: number; dy: number } | null>(null)
@@ -139,6 +142,7 @@ export function Card({
     setDraft('')
     setBranching(false)
     setBranchDraft('')
+    setExpanded(false)
     // 只让「影子」淡出：卡片本身保持不透明，避免透出背后的聊天内容造成闪烁感
     if (previous) {
       setGhost(previous)
@@ -339,6 +343,7 @@ export function Card({
         onJump(activeIndex + 1)
         return
       }
+      if (card.kind === 'ask') return
       if (!/^[1-9]$/.test(event.key) || card.streaming) return
       const level = levels[Number(event.key) - 1]
       if (!level) return
@@ -485,6 +490,18 @@ export function Card({
       }px`
     : '50% 0%'
 
+  // 摘要优先在段落边界截断，避免把半句话/代码块直接切开
+  const PREVIEW_LIMIT = 280
+  const preview = useMemo(() => {
+    const text = card.answer.trim()
+    if (text.length <= PREVIEW_LIMIT) return null
+    const slice = text.slice(0, PREVIEW_LIMIT)
+    const para = slice.lastIndexOf('\n\n')
+    const line = slice.lastIndexOf('\n')
+    const cut = para >= 120 ? para : line >= 120 ? line : PREVIEW_LIMIT
+    return slice.slice(0, cut).trimEnd()
+  }, [card.answer])
+
   return (
     <div
       ref={stackRef}
@@ -605,6 +622,7 @@ export function Card({
         <div className="card-term" title={card.anchor.quote}>
           {card.anchor.quote.slice(0, 60)}
         </div>
+        {card.kind === 'ask' && <span className="card-kind-badge">{t('卡片问答')}</span>}
         <span className="card-depth-badge" title={t('当前深度')}>
           {t('第 {n} 层', { n: depth })}
         </span>
@@ -705,37 +723,38 @@ export function Card({
         </div>
       )}
 
-      {longList ? (
-        <div className="card-depth long">
-          <select
-            value={selectedLevel?.id ?? ''}
-            title={selectedLevel?.stop ?? profile.axis_label}
-            disabled={card.streaming}
-            onChange={(event) => onDepthChange(event.target.value)}
-          >
-            {levels.map((level, index) => (
-              <option key={level.id} value={level.id} title={level.stop}>
-                {index + 1}. {level.label}
-              </option>
-            ))}
-          </select>
-          {selectedLevel && <span className="depth-hint">{selectedLevel.stop}</span>}
-        </div>
-      ) : (
-        <div className="card-depth">
-          {levels.map((level) => (
-            <button
-              key={level.id}
-              className={selectedLevel?.id === level.id ? 'active' : ''}
-              title={level.stop}
-              onClick={() => onDepthChange(level.id)}
+      {card.kind !== 'ask' &&
+        (longList ? (
+          <div className="card-depth long">
+            <select
+              value={selectedLevel?.id ?? ''}
+              title={selectedLevel?.stop ?? profile.axis_label}
               disabled={card.streaming}
+              onChange={(event) => onDepthChange(event.target.value)}
             >
-              {level.label}
-            </button>
-          ))}
-        </div>
-      )}
+              {levels.map((level, index) => (
+                <option key={level.id} value={level.id} title={level.stop}>
+                  {index + 1}. {level.label}
+                </option>
+              ))}
+            </select>
+            {selectedLevel && <span className="depth-hint">{selectedLevel.stop}</span>}
+          </div>
+        ) : (
+          <div className="card-depth">
+            {levels.map((level) => (
+              <button
+                key={level.id}
+                className={selectedLevel?.id === level.id ? 'active' : ''}
+                title={level.stop}
+                onClick={() => onDepthChange(level.id)}
+                disabled={card.streaming}
+              >
+                {level.label}
+              </button>
+            ))}
+          </div>
+        ))}
 
       <div className="card-body" ref={bodyRef} data-card-id={card.id ?? card.localId}
         onScroll={() => {
@@ -752,9 +771,25 @@ export function Card({
         <div
           className="card-body-inner"
           ref={innerRef}
-          dangerouslySetInnerHTML={{ __html: renderMarkdown(card.answer || (card.streaming ? '…' : '')) }}
+          dangerouslySetInnerHTML={{
+            __html: renderMarkdown(
+              card.answer
+                ? !expanded && preview
+                  ? `${preview}\n\n…`
+                  : card.answer
+                : card.streaming
+                  ? '…'
+                  : '',
+            ),
+          }}
         />
       </div>
+
+      {preview && (
+        <button className="card-expand" onClick={() => setExpanded((value) => !value)}>
+          {expanded ? t('收起') : t('展开全部')}
+        </button>
+      )}
 
       <div className="card-followup">
         <input
@@ -775,7 +810,7 @@ export function Card({
 
       <footer className="card-foot">
         <span className="hint">
-          {card.id ? t('如需系统学习，可升级为专题') : t('生成完成后可升级为专题')}
+          {card.id ? t('想深入就跟这张卡继续，或展开成新会话') : t('生成完成后可展开学习')}
         </span>
         <div className="actions">
           {card.saved && (
@@ -788,15 +823,15 @@ export function Card({
           </button>
           {card.promotedSessionId ? (
             <button className="primary" onClick={onOpenPromoted}>
-              {t('打开专题')}
+              {t('打开会话')}
             </button>
           ) : (
             <button
               onClick={onPromote}
               disabled={card.streaming || !card.id}
-              title={!card.id ? '等卡片生成完成后再升级' : '新建一个系统学习会话'}
+              title={!card.id ? '等卡片生成完成后再展开' : '以这张卡为起点新开一个独立会话'}
             >
-              {t('升级为专题')}
+              {t('展开学习')}
             </button>
           )}
         </div>

@@ -147,7 +147,7 @@ pub struct TopicNode {
     pub metadata: serde_json::Value,
 }
 
-/// 从阅读支线升级到专题时保存的“起点包”。
+/// 从阅读支线展开成专题时保存的“起点包”。
 /// 只带锚点附近的内容，不复制整段父会话历史。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSeed {
@@ -160,6 +160,9 @@ pub struct SessionSeed {
     pub card_id: CardId,
     pub quote: String,
     pub context: String,
+    /// 这张卡自己的问题（ask 卡必带；解释卡可为空）
+    #[serde(default)]
+    pub question: String,
     pub answer: String,
     pub depth: Depth,
     #[serde(default = "empty_metadata")]

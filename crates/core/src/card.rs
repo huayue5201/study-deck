@@ -65,12 +65,46 @@ impl Default for Depth {
     }
 }
 
+/// 卡片类型：模板解释 vs 用户手动提问（不套模板）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardKind {
+    Explain,
+    Ask,
+}
+
+impl CardKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CardKind::Explain => "explain",
+            CardKind::Ask => "ask",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "explain" => Some(CardKind::Explain),
+            "ask" => Some(CardKind::Ask),
+            _ => None,
+        }
+    }
+}
+
+impl Default for CardKind {
+    fn default() -> Self {
+        CardKind::Explain
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Card {
     pub id: CardId,
     pub session_id: SessionId,
     pub anchor: Anchor,
     pub depth: Depth,
+    /// 解释卡 / 手动问答卡；老数据按 explain 处理。
+    #[serde(default)]
+    pub kind: CardKind,
     /// 生成这张卡片用的模板；老数据为 None（按内置 tech 处理）。
     #[serde(default)]
     pub profile_id: Option<String>,
@@ -79,7 +113,7 @@ pub struct Card {
     pub level: Option<String>,
     pub question: String,
     pub answer: String,
-    /// 这张卡片升级成的专题会话；None 表示还没升级。
+    /// 这张卡片展开成的专题会话；None 表示还没展开。
     #[serde(default)]
     pub promoted_session_id: Option<SessionId>,
     /// 这张卡是在哪张卡的文字上展开的；None = 直接从主线消息展开。

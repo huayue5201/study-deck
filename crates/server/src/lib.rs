@@ -28,7 +28,7 @@ use serde::Deserialize;
 use serde_json::json;
 use store::Store;
 use studydeck_core::{
-    AgentEvent, Anchor, Card, CardId, CardProfile, CardTurn, Depth, Mastery, Message,
+    AgentEvent, Anchor, Card, CardId, CardKind, CardProfile, CardTurn, Depth, Mastery, Message,
     MessageStatus, Mode, SessionId, Topic, TopicEdgeKind, TopicNodeStatus, TurnRequest, TurnRole,
     TurnStatus, Usage,
 };
@@ -596,13 +596,11 @@ struct PromoteBody {
     card_id: String,
     title: Option<String>,
     depth_goal: Option<String>,
-    /// 指定则并入已有专题；不指定则新建专题。
-    topic_id: Option<String>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
 }
 
-/// 卡片 -> 专题会话。幂等：同一张卡重复调用不会产生重复专题。
+/// 卡片 -> 独立学习会话。不创建专题；同一张卡重复调用不会产生重复会话。
 async fn promote_session(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
@@ -615,7 +613,6 @@ async fn promote_session(
         body.title.as_deref(),
         depth,
         body.metadata,
-        body.topic_id.as_deref(),
     ) {
         Ok(promotion) => (StatusCode::CREATED, Json(promotion)).into_response(),
         Err(err) => api_error(StatusCode::BAD_REQUEST, err.to_string()),
@@ -1076,6 +1073,8 @@ struct TurnSpec {
     project_root: Option<PathBuf>,
     /// 回答语言：Some("en") 跟随英文界面
     locale: Option<String>,
+    /// 卡片类型：解释卡 / 手动问答卡
+    card_kind: Option<CardKind>,
     /// 卡片模板 id；None = 用当前默认模板
     profile_id: Option<String>,
     /// 用户选的档位 id
@@ -1193,6 +1192,11 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
         .and_then(|id| state.store.card_by_id(id).ok().flatten())
         .filter(|card| card.session_id == spec.session_id);
     let session_profile = state.store.session_profile(&session_key).ok().flatten();
+    let card_kind = existing_card
+        .as_ref()
+        .map(|card| card.kind)
+        .or(spec.card_kind)
+        .unwrap_or_default();
 
     // 第一轮用户消息自动成为标题，侧边栏才不会全是“未命名”。
     if spec.mode == Mode::Main {
@@ -1202,6 +1206,7 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
     // 卡片模式只有卡记录；主线模式建 user + assistant 两行
     // 卡片模板与档位：请求显式指定 > 当前默认模板 > 内置 tech
     let (resolved_profile, resolved_level) = match spec.mode {
+        Mode::Card if card_kind == CardKind::Ask => (None, None),
         Mode::Card => {
             let card_profile = existing_card
                 .as_ref()
@@ -1234,6 +1239,7 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
     };
 
     let resolved_depth = match spec.mode {
+        Mode::Card if card_kind == CardKind::Ask => spec.depth,
         Mode::Card => resolved_profile
             .as_ref()
             .map(|profile| depth_for_level(profile, resolved_level.as_deref()))
@@ -1294,6 +1300,7 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
                     session_id: spec.session_id.clone(),
                     anchor,
                     depth: resolved_depth.unwrap_or_default(),
+                    kind: card_kind,
                     profile_id: resolved_profile.as_ref().map(|profile| profile.id.clone()),
                     level: resolved_level.clone(),
                     parent_card_id: nest_parent.as_ref().map(|card| card.id.clone()),
@@ -1380,6 +1387,7 @@ fn begin_turn(state: &Arc<AppState>, spec: TurnSpec) -> Result<StartedTurn, Resp
         depth: resolved_depth,
         parent_card: nest_parent.clone().or(parent_card),
         card_history,
+        card_kind: (spec.mode == Mode::Card).then_some(card_kind),
         topic,
         seed,
         project_root,
@@ -1615,6 +1623,8 @@ struct ChatBody {
     card_id: Option<String>,
     #[serde(default)]
     card_history: Option<String>,
+    /// 卡片类型："explain" | "ask"（不传 = explain）
+    kind: Option<String>,
     /// 卡片模板 id（不传 = 当前默认模板）
     profile_id: Option<String>,
     /// 档位 id（不传 = 模板默认档）
@@ -1652,6 +1662,7 @@ async fn chat(State(state): State<Arc<AppState>>, Json(body): Json<ChatBody>) ->
         depth: body.depth.as_deref().and_then(Depth::parse),
         card_id: body.card_id,
         card_history: body.card_history,
+        card_kind: body.kind.as_deref().and_then(CardKind::parse),
         project_root: None,
         profile_id: body.profile_id,
         level: body.level,
@@ -1743,6 +1754,7 @@ async fn ask(State(state): State<Arc<AppState>>, Json(body): Json<AskBody>) -> R
         depth: None,
         card_id: None,
         card_history: None,
+        card_kind: None,
         project_root: if cwd == "inbox" {
             None
         } else {

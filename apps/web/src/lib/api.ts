@@ -331,13 +331,12 @@ export async function deleteSession(id: string): Promise<void> {
   await readJson<{ ok: boolean }>(await api(`/api/sessions/${id}`, { method: 'DELETE' }))
 }
 
-/** 把卡片升级成专题会话；同一张卡重复调用是幂等的。 */
+/** 把当前卡片展开成独立学习会话；只带当前卡，同一张卡重复调用是幂等的。 */
 export async function promoteCard(input: {
   session_id: string
   card_id: string
   title: string
   depth_goal: Depth
-  topic_id?: string | null
 }): Promise<PromotionResult> {
   return readJson<PromotionResult>(
     await api(`/api/sessions/${input.session_id}/promote`, {
@@ -347,7 +346,6 @@ export async function promoteCard(input: {
         card_id: input.card_id,
         title: input.title,
         depth_goal: input.depth_goal,
-        topic_id: input.topic_id ?? null,
       }),
     }),
   )

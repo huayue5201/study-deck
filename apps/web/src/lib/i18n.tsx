@@ -28,6 +28,8 @@ const EN: Record<string, string> = {
   '最近': 'Recent',
   '本地工作区 · 自动保存': 'Local workspace · Autosaved',
   '设置': 'Settings',
+  '展开全部': 'Show all',
+  '收起': 'Collapse',
   '更多': 'More',
   '复习': 'Review',
   '路径': 'Path',
@@ -68,6 +70,13 @@ const EN: Record<string, string> = {
   '关闭': 'Close',
   '返回会话': 'Back to chat',
   '解释选中内容': 'Explain selection',
+  '就这里追问': 'Ask about this',
+  '提问': 'Ask',
+  '基于这段内容提问': 'Ask a question about this text',
+  '不用提问，直接解释这段内容': 'Explain this text without a question',
+  '就这段内容问点什么…': 'Ask something about this…',
+  '问': 'Ask',
+  '卡片问答': 'Card Q&A',
   '输入问题…（Enter 发送，Shift+Enter 换行）': 'Ask something… (Enter to send, Shift+Enter for a new line)',
   '从一个具体问题开始': 'Start with a concrete question',
   '选中回答中的任意内容，可打开卡片就地解释；主线对话不会被打断。':
@@ -97,15 +106,18 @@ const EN: Record<string, string> = {
   '服务商': 'Provider',
   '模型': 'Model',
 
-  '升级为专题': 'Promote to topic',
-  '归入专题': 'Add to topic',
+  '展开学习': 'Expand into a chat',
   '新建专题': 'New topic',
   '新专题名': 'New topic name',
+  '新开会话': 'New chat',
+  '新会话名': 'New chat name',
   '比如：采样定理': 'e.g. Sampling theorem',
   '会新建一个主线会话，并从《{parent}》的「{quote}」带上起点上下文。原卡片和来源消息都会保留回链。':
     'Creates a new main chat seeded from “{quote}” in {parent}. The card and source message keep their backlinks.',
-  '会在这个专题下新建一个会话，并保留这张卡片的来源。':
-    'Creates a chat under this topic and keeps this card’s source.',
+  '会新开一个独立会话，只带这张卡的问题、回答、引文和起点上下文；不包含追问链或其他分支，也不归入任何专题。原卡片和来源消息都会保留回链。':
+    'Creates a standalone chat with only this card’s question, answer, quote and starting context. Follow-up threads and branches are not copied, and it is not added to any topic.',
+  '新会话会出现在左侧普通会话里，之后可以继续追问。':
+    'The new chat appears under normal chats on the left and can be continued there.',
   '会新建专题和会话。创建后可在顶部点「生成学习地图」。':
     'Creates a topic and chat. After that, use “Generate learning map” at the top.',
   '创建专题': 'Create topic',
@@ -239,9 +251,9 @@ const EN: Record<string, string> = {
   '保存到账本': 'Save to ledger',
   '已保存': 'Saved',
   '重新生成': 'Regenerate',
-  '如需系统学习，可升级为专题': 'For systematic study, promote this to a topic',
-  '生成完成后可升级为专题': 'Promotion is available after generation',
-  '打开专题': 'Open topic',
+  '想深入就跟这张卡继续，或展开成新会话': 'Keep following up here, or expand this card into a new chat',
+  '生成完成后可展开学习': 'You can expand this card after generation',
+  '打开会话': 'Open chat',
   '拖动卡片可移动': 'Drag to move',
   '出错': 'Error',
 

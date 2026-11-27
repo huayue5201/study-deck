@@ -45,6 +45,7 @@ import {
   type CardProfile,
   type CardRecord,
   type CardTurn,
+  type CardKind,
   type Depth,
   type GlossaryEntry,
   type Message,
@@ -155,6 +156,11 @@ function resolveLevel(profile: CardProfile, preferred?: string | null): string {
     return profile.default_level
   }
   return profile.levels[0]?.id ?? 'can_tune'
+}
+
+/** 解释卡只有在没有追问历史时才能复用；追问过就另开一张，避免解释继承追问。 */
+function isPureExplanation(card: { kind?: string | null; answer: string }): boolean {
+  return (card.kind ?? 'explain') === 'explain' && !card.answer.includes('**追问：**')
 }
 
 /** 把 card_turns 还原成卡片正文：首答 + 每轮「追问/回答」，和流式时的拼接格式一致。 */
@@ -349,6 +355,7 @@ export default function App() {
           localId: record.id,
           id: record.id,
           anchor: record.anchor,
+          kind: record.kind ?? 'explain',
           level: record.level ?? '',
           question: record.question,
           answer: record.answer,
@@ -471,6 +478,7 @@ export default function App() {
 
   // 卡片栈：祖先在下，当前卡是 card
   const [pending, setPending] = useState<PendingSelection | null>(null)
+  const [askDraft, setAskDraft] = useState('')
   const [streamingId, setStreamingId] = useState<string | null>(null)
   /** 中止所有在跑的流（切会话/删会话）：否则旧流的 token 会写进新会话 */
   const abortStreams = useCallback(() => {
@@ -966,6 +974,7 @@ export default function App() {
       cardHistory?: string,
       parentCardId?: string | null,
       parentText?: string | null,
+      kind: CardKind = 'explain',
     ) => {
       const sid = sessionRef.current
       if (!sid) return
@@ -978,6 +987,7 @@ export default function App() {
             ? `${current.answer}\n\n---\n\n**追问：** ${text}\n\n`
             : '',
         streaming: true,
+        kind,
         level,
         question: text,
         sourceText,
@@ -990,6 +1000,7 @@ export default function App() {
             mode: 'card',
             text,
             anchor,
+            kind,
             profile_id: sessionProfile.id,
             level,
             locale: lang,
@@ -1057,15 +1068,7 @@ export default function App() {
   )
 
   const submitPromotion = useCallback(
-    async ({
-      title,
-      depth,
-      topicId,
-    }: {
-      title: string
-      depth: Depth
-      topicId: string | null
-    }) => {
+    async ({ title }: { title: string }) => {
       if (!promote?.id || !sessionRef.current) return
       setPromoting(true)
       try {
@@ -1073,8 +1076,7 @@ export default function App() {
           session_id: sessionRef.current,
           card_id: promote.id,
           title,
-          depth_goal: depth,
-          topic_id: topicId,
+          depth_goal: depthForLevel(sessionProfile, promote.level),
         })
         const view = await fetchSession(result.session_id)
         localStorage.setItem('studydeck.session', view.id)
@@ -1114,6 +1116,7 @@ export default function App() {
       sourceText: info.sourceText,
       fromCardId: info.cardId,
     })
+    setAskDraft('')
   }, [])
 
 
@@ -1137,7 +1140,7 @@ export default function App() {
         gist: stripMarkdown(card.answer).slice(0, 160),
         depth: depthForLevel(sessionProfile, card.level),
         anchor: card.anchor,
-        profile_id: sessionProfile.id,
+        profile_id: card.kind === 'ask' ? undefined : sessionProfile.id,
         level: card.level,
         parent_card_id: card.parentCardId ?? undefined,
         card_id: card.id ?? undefined,
@@ -1159,6 +1162,7 @@ export default function App() {
         localId: newLocalId(),
         id: null,
         anchor: card.anchor,
+        kind: card.kind,
         level,
         answer: '',
         streaming: true,
@@ -1243,9 +1247,57 @@ export default function App() {
     [focusId],
   )
 
+  const submitSelectionAsk = useCallback(() => {
+    if (!pending) return
+    const text = askDraft.trim()
+    if (!text) return
+    const { anchor, rect, sourceText, fromCardId } = pending
+    const nestingFrom =
+      fromCardId && card && (fromCardId === card.id || fromCardId === card.localId) ? card : null
+    const parentCardId = nestingFrom?.id ?? null
+    const parentLocalId = nestingFrom?.localId ?? null
+    const parentText = nestingFrom?.answer ?? null
+    const node: OpenCardState = {
+      localId: newLocalId(),
+      id: null,
+      anchor,
+      kind: 'ask',
+      level: resolveLevel(sessionProfile),
+      answer: '',
+      streaming: true,
+      saved: false,
+      promotedSessionId: null,
+      parentCardId,
+      parentLocalId,
+      parentText,
+      question: text,
+      rect,
+      sourceText,
+    }
+    setPending(null)
+    setAskDraft('')
+    window.getSelection()?.removeAllRanges()
+    addCard(node)
+    focusOn(node.localId)
+    void runCard(
+      node.localId,
+      anchor,
+      node.level,
+      text,
+      null,
+      sourceText,
+      false,
+      undefined,
+      parentCardId,
+      parentText,
+      'ask',
+    )
+  }, [askDraft, sessionProfile, addCard, card, focusOn, pending, runCard])
+
   const openCard = useCallback(async () => {
     if (!pending || openingRef.current) return
     openingRef.current = true
+    setAskDraft('')
     try {
     const { anchor, rect, sourceText, fromCardId } = pending
     setPending(null)
@@ -1271,47 +1323,59 @@ export default function App() {
       return true
     }
 
-    // 1) 内存里已经有同一处划词（同父卡）：直接跳，0 次模型调用
+    // 1) 内存里已有同一处划词（同父卡、且是未追问过的解释卡）：直接跳
     const memoryHit = Object.values(cards).find(
-      (item) => item.parentLocalId === parentLocalId && sameAnchor(item),
+      (item) => item.parentLocalId === parentLocalId && sameAnchor(item) && isPureExplanation(item),
     )
     if (memoryHit && land((item) => item.localId === memoryHit.localId)) return
 
     // 2) 数据库里已有同一处划词（父卡已经有真实 id 才能可靠比对）
     if (!nestingFrom || parentCardId) {
       const existing = sessionCardsRef.current.find(
-        (item) => item.session_id === sessionRef.current && sameAnchorRecord(item, anchor, parentCardId),
+        (item) =>
+          item.session_id === sessionRef.current &&
+          sameAnchorRecord(item, anchor, parentCardId) &&
+          isPureExplanation(item),
       )
       if (existing) {
-        if (land((item) => item.id === existing.id)) return
-        // 不在内存树里：作为新节点接在后面，内容直接复用
+        if (land((item) => item.id === existing.id && isPureExplanation(item))) return
+        // 不在内存树里：确认线程里没有追问，才复用首答；有追问就当作一张新卡
+        let reusable = isPureExplanation(existing)
         let reusedAnswer = existing.answer
-        try {
-          const thread = await fetchCardThread(existing.id)
-          reusedAnswer = threadToAnswer(thread.card.answer, thread.turns)
-        } catch {
-          // 取线程失败就退回 cards.answer，别阻断打开
+        if (reusable) {
+          try {
+            const thread = await fetchCardThread(existing.id)
+            reusable = !thread.turns.some((turn) => turn.role === 'user')
+            reusedAnswer = reusable
+              ? threadToAnswer(thread.card.answer, thread.turns)
+              : existing.answer
+          } catch {
+            reusable = false
+          }
         }
-        const reused: OpenCardState = {
-          localId: newLocalId(),
-          id: existing.id,
-          anchor,
-          level: existing.level ?? resolveLevel(sessionProfile),
-          answer: reusedAnswer,
-          streaming: false,
-          // 有卡片不代表已记账：账本条目只由用户点「保存到账本」产生
-          saved: false,
-          promotedSessionId: existing.promoted_session_id ?? null,
-          parentCardId,
-          parentLocalId,
-          parentText: nestingFrom?.answer ?? null,
-          question: anchor.quote,
-          rect,
-          sourceText,
+        if (reusable) {
+          const reused: OpenCardState = {
+            localId: newLocalId(),
+            id: existing.id,
+            anchor,
+            kind: existing.kind ?? 'explain',
+            level: existing.level ?? resolveLevel(sessionProfile),
+            answer: reusedAnswer,
+            streaming: false,
+            // 有卡片不代表已记账：账本条目只由用户点「保存到账本」产生
+            saved: false,
+            promotedSessionId: existing.promoted_session_id ?? null,
+            parentCardId,
+            parentLocalId,
+            parentText: nestingFrom?.answer ?? null,
+            question: existing.question || anchor.quote,
+            rect,
+            sourceText,
+          }
+          addCard(reused)
+          focusOn(reused.localId)
+          return
         }
-        addCard(reused)
-        focusOn(reused.localId)
-        return
       }
     }
 
@@ -1324,6 +1388,7 @@ export default function App() {
           localId: newLocalId(),
           id: null,
           anchor,
+          kind: 'explain',
           level,
           answer: `**已有记录**（${sessionProfile.levels.find((item) => item.id === level)?.label ?? hit.depth} · ${MASTERY_LABEL[hit.mastery]} · 记于 ${hit.created_at.slice(0, 10)}）\n\n${hit.gist}\n\n> 这是账本里的旧结论。要重新讲一遍点「重新生成」。`,
           streaming: false,
@@ -1350,6 +1415,7 @@ export default function App() {
       localId: newLocalId(),
       id: null,
       anchor,
+      kind: 'explain',
       level,
       answer: '',
       streaming: true,
@@ -1390,6 +1456,7 @@ export default function App() {
           localId: newLocalId(),
           id: thread.card.id,
           anchor: thread.card.anchor,
+          kind: thread.card.kind ?? 'explain',
           level: thread.card.level ?? resolveLevel(sessionProfile, thread.card.depth),
           answer: threadToAnswer(thread.card.answer, thread.turns),
           streaming: false,
@@ -1697,13 +1764,10 @@ export default function App() {
       </div>
 
       {pending && (
-        <button
-          className="explain-btn"
+        <div
+          className="selection-actions selection-ask"
           style={{
-            left: Math.min(
-              Math.max(8, pending.rect.left),
-              window.innerWidth - 140,
-            ),
+            left: Math.min(Math.max(8, pending.rect.left), window.innerWidth - 448),
             top:
               pending.rect.top < 56
                 ? Math.min(
@@ -1713,10 +1777,37 @@ export default function App() {
                 : Math.max(8, pending.rect.top - 8),
             transform: pending.rect.top < 56 ? 'none' : 'translateY(-100%)',
           }}
-          onClick={openCard}
         >
-          {t('解释选中内容')}
-        </button>
+          <input
+            autoFocus
+            value={askDraft}
+            placeholder={t('就这段内容问点什么…')}
+            onChange={(event) => setAskDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setPending(null)
+                setAskDraft('')
+                return
+              }
+              if (event.key === 'Enter' && !isImeComposing(event)) {
+                event.preventDefault()
+                submitSelectionAsk()
+              }
+            }}
+          />
+          <button
+            className="ask-submit"
+            onClick={submitSelectionAsk}
+            disabled={!askDraft.trim()}
+            title={t('基于这段内容提问')}
+          >
+            {t('提问')}
+          </button>
+          <button className="explain-btn" onClick={openCard} title={t('不用提问，直接解释这段内容')}>
+            {t('解释')}
+          </button>
+        </div>
       )}
 
       <CardLayer
@@ -1751,6 +1842,9 @@ export default function App() {
             card.sourceText,
             true,
             card.answer,
+            undefined,
+            undefined,
+            card.kind,
           )
         }}
         onSave={() => void saveCard()}
@@ -1761,9 +1855,14 @@ export default function App() {
             card.localId,
             card.anchor,
             resolveLevel(sessionProfile, card.level),
-            t('请重新解释这段内容。'),
+            card.kind === 'ask' ? card.question : t('请重新解释这段内容。'),
             card.id,
             card.sourceText,
+            false,
+            undefined,
+            undefined,
+            undefined,
+            card.kind,
           )
         }}
         onPromote={() => {
@@ -1779,9 +1878,7 @@ export default function App() {
       {promote && (
         <PromoteDialog
           card={promote}
-          initialDepth={depthForLevel(sessionProfile, promote.level)}
           parentTitle={sessions.find((item) => item.id === sessionId)?.title ?? ''}
-          topics={topics}
           busy={promoting}
           onCancel={() => setPromote(null)}
           onSubmit={(input) => void submitPromotion(input)}

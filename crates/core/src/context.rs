@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     anchor::Anchor,
+    card::CardKind,
     card::{Card, Depth},
     profiles::CardProfile,
     session::Message,
@@ -23,6 +24,8 @@ pub struct TurnRequest {
     pub text: String,
     pub anchor: Option<Anchor>,
     pub depth: Option<Depth>,
+    /// 卡片类型：解释卡走模板，问答卡直接回答。
+    pub card_kind: Option<CardKind>,
     /// 卡片模板；None 时退回内置 tech 范式。
     pub profile: Option<CardProfile>,
     /// 用户选的档位 id（profile 内有效）。
@@ -37,7 +40,7 @@ pub struct TurnRequest {
     pub card_history: Option<String>,
     /// 当前会话所属专题；普通会话为 None。
     pub topic: Option<Topic>,
-    /// 从阅读支线升级到专题时携带的起点包；普通会话为 None。
+    /// 从阅读支线展开成专题时携带的起点包；普通会话为 None。
     pub seed: Option<SessionSeed>,
     /// 本次会话所属项目根目录；存在时开放只读文件工具。
     pub project_root: Option<PathBuf>,
