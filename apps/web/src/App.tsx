@@ -179,6 +179,24 @@ function threadToAnswer(initial: string, turns: CardTurn[]): string {
   return out
 }
 
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    // WebView 或非安全上下文下 clipboard 可能不可用，退回 execCommand
+    const area = document.createElement('textarea')
+    area.value = text
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    const ok = document.execCommand('copy')
+    area.remove()
+    return ok
+  }
+}
+
 export default function App() {
   const { t, lang } = useI18n()
   const [sessionId, setSessionId] = useState<string | null>(null)
@@ -479,6 +497,7 @@ export default function App() {
   // 卡片栈：祖先在下，当前卡是 card
   const [pending, setPending] = useState<PendingSelection | null>(null)
   const [askDraft, setAskDraft] = useState('')
+  const [copiedSelection, setCopiedSelection] = useState(false)
   const [streamingId, setStreamingId] = useState<string | null>(null)
   /** 中止所有在跑的流（切会话/删会话）：否则旧流的 token 会写进新会话 */
   const abortStreams = useCallback(() => {
@@ -1117,8 +1136,31 @@ export default function App() {
       fromCardId: info.cardId,
     })
     setAskDraft('')
+    setCopiedSelection(false)
   }, [])
 
+  const copySelection = useCallback(async () => {
+    const text = pending?.anchor.quote ?? ''
+    if (!text) return
+    if (await copyToClipboard(text)) {
+      setCopiedSelection(true)
+      window.setTimeout(() => setCopiedSelection(false), 1400)
+    }
+  }, [pending])
+
+  // 浮层打开后焦点若落在空输入框，⌘C 仍应复制正文选区，而不是空输入框
+  useEffect(() => {
+    if (!pending) return
+    const onCopy = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'c') return
+      const active = document.activeElement
+      if (!(active instanceof HTMLInputElement) || !active.closest('.selection-ask') || active.value) return
+      event.preventDefault()
+      void copySelection()
+    }
+    window.addEventListener('keydown', onCopy, true)
+    return () => window.removeEventListener('keydown', onCopy, true)
+  }, [pending, copySelection])
 
   const changeSessionProfile = useCallback(async (profileId: string) => {
     const sid = sessionRef.current
@@ -1779,7 +1821,6 @@ export default function App() {
           }}
         >
           <input
-            autoFocus
             value={askDraft}
             placeholder={t('就这段内容问点什么…')}
             onChange={(event) => setAskDraft(event.target.value)}
@@ -1796,6 +1837,13 @@ export default function App() {
               }
             }}
           />
+          <button
+            className="selection-copy"
+            onClick={() => void copySelection()}
+            title={t('复制选中内容')}
+          >
+            {copiedSelection ? t('已复制') : t('复制')}
+          </button>
           <button
             className="ask-submit"
             onClick={submitSelectionAsk}

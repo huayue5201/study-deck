@@ -112,6 +112,8 @@ button.icon { border: none; background: transparent; font-size: 18px; line-heigh
 }
 .selection-actions button { height: 30px; padding: 0 11px; border-radius: 7px; font-size: 12.5px; }
 .selection-actions.selection-ask { padding: 4px; gap: 4px; }
+.selection-actions .selection-copy { color: var(--muted); }
+.selection-actions .selection-copy:hover { color: var(--text); }
 .selection-ask input {
   width: min(300px, 48vw); height: 30px; padding: 0 9px; border-radius: 7px;
   border: 1px solid var(--line); background: var(--bg); color: var(--text);
